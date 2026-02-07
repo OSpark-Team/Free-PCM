@@ -122,7 +122,9 @@ export class AudioRendererPlayer {
     const audioStreamInfo: audio.AudioStreamInfo = {
       samplingRate: this.mapSamplingRate(info.sampleRate),
       channels: this.mapChannels(info.channelCount),
-      sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
+      sampleFormat: info.sampleFormatCode === 3 
+        ? audio.AudioSampleFormat.SAMPLE_FORMAT_S32LE 
+        : audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
       encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
     };
     const audioRendererInfo: audio.AudioRendererInfo = {

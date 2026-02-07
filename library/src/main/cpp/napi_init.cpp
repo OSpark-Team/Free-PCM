@@ -458,6 +458,7 @@ struct PcmStreamDecoderContext {
     int32_t sampleRate;
     int32_t channelCount;
     int32_t bitrate;
+    int32_t sampleFormat;  // 1=S16LE, 3=S32LE
 
     std::atomic<bool> cancel;
     bool success;
@@ -512,12 +513,19 @@ static void CallJsDecoderEvent(napi_env env, napi_value /*jsCb*/, void* context,
 
             // sampleFormat: use string for ArkTS friendliness
             napi_value sf;
-            if (payload->sampleFormat == 1) {
+            if (payload->sampleFormat == 3) {
+                napi_create_string_utf8(env, "s32le", NAPI_AUTO_LENGTH, &sf);
+            } else if (payload->sampleFormat == 1) {
                 napi_create_string_utf8(env, "s16le", NAPI_AUTO_LENGTH, &sf);
             } else {
                 napi_create_string_utf8(env, "unknown", NAPI_AUTO_LENGTH, &sf);
             }
             napi_set_named_property(env, info, "sampleFormat", sf);
+
+            // sampleFormatCode: numeric format for easier handling
+            napi_value sfc;
+            napi_create_int32(env, payload->sampleFormat, &sfc);
+            napi_set_named_property(env, info, "sampleFormatCode", sfc);
 
             napi_value dur;
             napi_create_double(env, static_cast<double>(payload->durationMs), &dur);
@@ -861,7 +869,8 @@ static void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         progressCb,
         pcmCb,
         errorCb,
-        &ctx->cancel);
+        &ctx->cancel,
+        ctx->sampleFormat);  // Pass sampleFormat to decoder
 
     ctx->success = ok;
     if (ctx->ring) {
@@ -965,6 +974,7 @@ static napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     int32_t sampleRate = 0;
     int32_t channelCount = 0;
     int32_t bitrate = 0;
+    int32_t sampleFormat = 1;  // Default to S16LE (1), S32LE = 3
     size_t ringBytes = 512 * 1024; // default
 
     bool optEqEnabled = false;
@@ -985,6 +995,13 @@ static napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
             }
             if (napi_get_named_property(env, args[1], "bitrate", &v) == napi_ok) {
                 napi_get_value_int32(env, v, &bitrate);
+            }
+            if (napi_get_named_property(env, args[1], "sampleFormat", &v) == napi_ok) {
+                int32_t sf = 1;
+                if (napi_get_value_int32(env, v, &sf) == napi_ok) {
+                    // Validate: only 1 (S16LE) or 3 (S32LE) are supported
+                    sampleFormat = (sf == 3) ? 3 : 1;
+                }
             }
             if (napi_get_named_property(env, args[1], "ringBytes", &v) == napi_ok) {
                 int32_t rb = 0;
@@ -1056,6 +1073,7 @@ static napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     ctx->sampleRate = sampleRate;
     ctx->channelCount = channelCount;
     ctx->bitrate = bitrate;
+    ctx->sampleFormat = sampleFormat;
     ctx->cancel.store(false);
     ctx->success = false;
     ctx->readySettled = false;

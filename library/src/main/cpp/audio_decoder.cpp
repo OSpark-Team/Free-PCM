@@ -123,7 +123,7 @@ bool AudioDecoder::Initialize(const std::string& mimeType) {
     return true;
 }
 
-bool AudioDecoder::Configure(int32_t sampleRate, int32_t channelCount, int32_t bitrate) {
+bool AudioDecoder::Configure(int32_t sampleRate, int32_t channelCount, int32_t bitrate, int32_t sampleFormat) {
     if (!audioDecoder_) {
         OH_LOG_ERROR(LOG_APP, "Audio decoder not initialized");
         return false;
@@ -165,10 +165,15 @@ bool AudioDecoder::Configure(int32_t sampleRate, int32_t channelCount, int32_t b
         OH_LOG_INFO(LOG_APP, "Bitrate not set (optional parameter skipped)");
     }
 
-    // 输出采样格式：默认输出 S16LE，便于直接喂给 AudioRenderer（ENCODING_TYPE_RAW）
-    // 说明：此 key 的取值与 SAMPLE_S16LE 枚举一致（值为 1）。
-    OH_AVFormat_SetIntValue(format_, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, 1);
-    OH_LOG_INFO(LOG_APP, "Set output sample format: S16LE");
+    // 输出采样格式：支持 S16LE (1) 和 S32LE (3)
+    // 说明：此 key 的取值与 AudioSampleFormat 枚举一致
+    int32_t finalSampleFormat = (sampleFormat == 3) ? 3 : 1;  // 3 = S32LE, 默认 1 = S16LE
+    OH_AVFormat_SetIntValue(format_, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, finalSampleFormat);
+    if (finalSampleFormat == 3) {
+        OH_LOG_INFO(LOG_APP, "Set output sample format: S32LE");
+    } else {
+        OH_LOG_INFO(LOG_APP, "Set output sample format: S16LE");
+    }
 
     // 配置解码器
     int32_t ret = OH_AudioCodec_Configure(audioDecoder_, format_);
@@ -245,7 +250,8 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                                      const ProgressCallback& progressCb,
                                      const PcmDataCallback& pcmCb,
                                      const ErrorCallback& errorCb,
-                                     CancelFlag* cancelFlag)
+                                     CancelFlag* cancelFlag,
+                                     int32_t sampleFormat)
 {
     // 使用 RAII 机制自动清理 cancelFlag 指针
     struct CancelGuard {
@@ -411,12 +417,13 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             return false;
         }
 
-        // 优先使用检测到的参数，WAV 格式通常为 S16LE
+        // 优先使用检测到的参数，WAV 格式使用传入的 sampleFormat 或默认为 S16LE
         int32_t finalSR = detectedSampleRate_ > 0 ? detectedSampleRate_ : (sampleRate > 0 ? sampleRate : 44100);
         int32_t finalCh = detectedChannelCount_ > 0 ? detectedChannelCount_ : (channelCount > 0 ? channelCount : 2);
+        int32_t finalSF = (sampleFormat == 3) ? 3 : 1; // 使用传入的 sampleFormat: 3=S32LE, 默认 1=S16LE
         
         if (infoCb) {
-            infoCb(finalSR, finalCh, 1 /* S16LE */, durationMs_);
+            infoCb(finalSR, finalCh, finalSF, durationMs_);
         }
 
         if (OH_AVDemuxer_SelectTrackByID(demuxer, audioTrackIndex) != AV_ERR_OK) {
@@ -507,10 +514,10 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
     const int32_t finalSampleRate = (sampleRate > 0) ? sampleRate : ((detectedSampleRate_ > 0) ? detectedSampleRate_ : 44100);
     const int32_t finalChannelCount = (channelCount > 0) ? channelCount : ((detectedChannelCount_ > 0) ? detectedChannelCount_ : 2);
-    const int32_t finalSampleFormat = 1; // S16LE
+    const int32_t finalSampleFormat = (sampleFormat == 3) ? 3 : 1; // Use passed sampleFormat: 3=S32LE, 1=S16LE
 
     // 配置解码参数
-    if (!Configure(finalSampleRate, finalChannelCount, bitrate)) {
+    if (!Configure(finalSampleRate, finalChannelCount, bitrate, finalSampleFormat)) {
         reportError("configure", -1, "Failed to configure decoder");
         cleanup();
         return false;

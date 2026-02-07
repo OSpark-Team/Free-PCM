@@ -65,13 +65,15 @@ public:
     // - infoCb：在解析出音频参数并启动解码器后调用一次
     // - pcmCb：持续回调输出 PCM；返回 false 将中止解码
     // - cancelFlag：可选，置 true 时尽快停止
+    // - sampleFormat: 输出采样格式，1=S16LE, 3=S32LE，默认 1
     bool DecodeToPcmStream(const std::string& inputPathOrUri,
                            int32_t sampleRate, int32_t channelCount, int32_t bitrate,
                            const InfoCallback& infoCb,
                            const ProgressCallback& progressCb,
                            const PcmDataCallback& pcmCb,
                            const ErrorCallback& errorCb,
-                           CancelFlag* cancelFlag);
+                           CancelFlag* cancelFlag,
+                           int32_t sampleFormat = 1);
 
     // 停止解码
     bool Stop();
@@ -115,7 +117,8 @@ private:
     // sampleRate: 采样率（必须），<= 0 时使用默认值 44100
     // channelCount: 声道数（必须），<= 0 时使用默认值 2
     // bitrate: 比特率（可选），<= 0 时不设置
-    bool Configure(int32_t sampleRate = 0, int32_t channelCount = 0, int32_t bitrate = 0);
+    // sampleFormat: 采样格式（可选），1=S16LE, 3=S32LE，默认 1=S16LE
+    bool Configure(int32_t sampleRate = 0, int32_t channelCount = 0, int32_t bitrate = 0, int32_t sampleFormat = 1);
 
     // 开始解码
     bool Start();

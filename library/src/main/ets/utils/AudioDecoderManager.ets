@@ -29,8 +29,10 @@ export interface PcmStreamInfo {
   sampleRate: number;
   /** 声道数 */
   channelCount: number;
-  /** 采样格式 (如 's16le') */
+  /** 采样格式 (如 's16le', 's32le') */
   sampleFormat: string;
+  /** 采样格式编码: 1=S16LE, 3=S32LE */
+  sampleFormatCode: number;
   /** 总时长 (ms) */
   durationMs: number;
 }
@@ -43,6 +45,8 @@ export interface PcmStreamDecoderOptions {
   channelCount?: number;
   /** 目标比特率 */
   bitrate?: number;
+  /** 采样格式：1=S16LE, 3=S32LE，默认 S16LE */
+  sampleFormat?: number;
   /** 内部环形缓冲区大小 (Byte) */
   ringBytes?: number;
   /** 是否启用均衡器 */

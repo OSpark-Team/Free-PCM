@@ -119,9 +119,10 @@ struct Index {
 
     try {
       const decoder = this.decoderTool.createStreamDecoder(url, {
-        ringBytes: 64 * 1024,
+        ringBytes: 256 * 1024,
         eqEnabled: true,
-        eqGainsDb: this.eqGainsDb
+        eqGainsDb: this.eqGainsDb,
+        sampleFormat: 3
       }, {
         onProgress: (p: DecodeAudioProgress): void => this.updateProgress(p),
         onError: (e: Error) => { this.status = `错误: ${e.message}`; }
@@ -129,7 +130,7 @@ struct Index {
 
       this.currentDecoder = decoder;
       const info = await decoder.ready;
-      this.status = `播放中: ${info.sampleRate}Hz`;
+      this.status = `播放中: ${info.sampleRate}Hz, ${info.sampleFormat}`;
 
       await this.player.play(decoder, info);
       await decoder.done;

@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// 10-band graphic EQ for interleaved S16LE PCM.
+// 10-band graphic EQ for interleaved S16LE/S32LE PCM.
 // Bands: 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k, 16k.
 // Implementation: RBJ peaking EQ biquads (Q ~ 1.0).
 class PcmEqualizer {
@@ -22,10 +22,15 @@ public:
     bool IsReady() const;
     bool IsEnabled() const;
 
-    // Process in-place.
+    // Process in-place (S16LE).
     // samples: interleaved int16 PCM.
     // frameCount: number of frames (a frame contains channelCount samples).
     void Process(int16_t* samples, size_t frameCount);
+
+    // Process in-place (S32LE).
+    // samples: interleaved int32 PCM.
+    // frameCount: number of frames (a frame contains channelCount samples).
+    void Process(int32_t* samples, size_t frameCount);
 
 private:
     struct Biquad {
@@ -45,6 +50,7 @@ private:
 
     static float ClampFloat(float v, float lo, float hi);
     static int16_t ClampS16(float v);
+    static int32_t ClampS32(float v);
     static Biquad MakePeaking(float sampleRate, float freqHz, float q, float gainDb);
 
     void RecalcBiquads();
