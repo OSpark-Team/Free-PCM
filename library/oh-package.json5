@@ -1,0 +1,28 @@
+{
+  "name": "@okysu/free-pcm",
+  "version": "1.0.0",
+  "description": "Free PCM 音频解码库 - 支持多种音频格式解码为 PCM，提供流式解码和 10 段均衡器功能",
+  "main": "Index.ets",
+  "author": "okysu",
+  "license": "Apache-2.0",
+  "keywords": [
+    "audio",
+    "decoder",
+    "pcm",
+    "equalizer",
+    "stream",
+    "music",
+    "音频",
+    "解码",
+    "均衡器"
+  ],
+  "tags": [
+    "音频解码",
+    "PCM",
+    "均衡器",
+    "流式解码"
+  ],
+  "dependencies": {
+    "liblibrary.so": "file:./src/main/cpp/types/liblibrary"
+  }
+}
