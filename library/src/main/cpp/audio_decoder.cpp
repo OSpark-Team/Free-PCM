@@ -247,6 +247,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                                      const ErrorCallback& errorCb,
                                      CancelFlag* cancelFlag)
 {
+    // 使用 RAII 机制自动清理 cancelFlag 指针
     struct CancelGuard {
         AudioDecoder* self;
         ~CancelGuard() { self->cancelFlag_ = nullptr; }
@@ -254,16 +255,19 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
     cancelFlag_ = cancelFlag;
 
+    // 重置内部状态变量
     durationMs_ = 0;
     detectedSampleRate_ = 0;
     detectedChannelCount_ = 0;
     lastProgressPercent_ = -1;
     lastProgressPtsMs_ = -1;
 
+    // 触发初始进度回调
     if (progressCb) {
         progressCb(0.0, 0, 0);
     }
 
+    // 错误上报辅助函数
     auto reportError = [&](const std::string& stage, int32_t code, const std::string& msg) {
         if (errorCb) {
             errorCb(stage, code, msg);
@@ -275,7 +279,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         return true;
     }
 
-    // 1. 创建 AVSource（支持本地 FD / 远程 URL）
+    // 创建 AVSource，支持本地文件描述符或网络 URI
     const bool isRemoteUri = IsHttpUri(inputPathOrUri);
 
     int32_t fd = -1;
@@ -309,6 +313,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         }
     }
 
+    // 资源清理辅助函数
     auto cleanup = [&]() {
         if (demuxer) {
             OH_AVDemuxer_Destroy(demuxer);
@@ -324,7 +329,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         }
     };
 
-    // 2. 获取 source 信息（轨道数、时长）
+    // 获取源文件格式信息，包括轨道数和总时长
     int32_t trackCount = 0;
     {
         OH_AVFormat* sourceFormat = OH_AVSource_GetSourceFormat(source);
@@ -350,7 +355,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         OH_AVFormat_Destroy(sourceFormat);
     }
 
-    // 3. 创建解封装器
+    // 创建解封装器
     demuxer = OH_AVDemuxer_CreateWithSource(source);
     if (!demuxer) {
         reportError("create_demuxer", -1, "Failed to create demuxer");
@@ -358,7 +363,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         return false;
     }
 
-    // 4. 查找音频轨道 & 获取音频参数
+    // 遍历轨道查找音频流并解析参数
     uint32_t audioTrackIndex = 0;
     bool foundAudioTrack = false;
     std::string audioCodecMime;
@@ -393,7 +398,107 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         return false;
     }
 
-    // 5. 初始化/配置/启动解码器
+    // 针对 audio/raw 格式（如 WAV）启用直通模式，绕过硬件解码器
+    if (audioCodecMime == "audio/raw") {
+        OH_LOG_INFO(LOG_APP, "MIME type is audio/raw, entering passthrough mode");
+
+        // 创建用于读取原始数据的缓冲区
+        int32_t bufferSize = 8192; 
+        OH_AVBuffer* buffer = OH_AVBuffer_Create(bufferSize);
+        if (!buffer) {
+            reportError("create_buffer", -1, "Failed to create buffer for raw read");
+            cleanup();
+            return false;
+        }
+
+        // 优先使用检测到的参数，WAV 格式通常为 S16LE
+        int32_t finalSR = detectedSampleRate_ > 0 ? detectedSampleRate_ : (sampleRate > 0 ? sampleRate : 44100);
+        int32_t finalCh = detectedChannelCount_ > 0 ? detectedChannelCount_ : (channelCount > 0 ? channelCount : 2);
+        
+        if (infoCb) {
+            infoCb(finalSR, finalCh, 1 /* S16LE */, durationMs_);
+        }
+
+        if (OH_AVDemuxer_SelectTrackByID(demuxer, audioTrackIndex) != AV_ERR_OK) {
+            reportError("select_track", -1, "Failed to select audio track");
+            OH_AVBuffer_Destroy(buffer);
+            cleanup();
+            return false;
+        }
+
+        bool ok = true;
+        int32_t consecutiveNoDataCount = 0;
+        const int32_t MAX_NO_DATA_RETRIES = 100;
+        
+        // 循环读取数据并直接回调
+        while (true) {
+            if (cancelFlag_ && cancelFlag_->load()) {
+                OH_LOG_INFO(LOG_APP, "Decode canceled (raw mode)");
+                ok = true; 
+                break;
+            }
+
+            int32_t ret = OH_AVDemuxer_ReadSampleBuffer(demuxer, audioTrackIndex, buffer);
+            if (ret != AV_ERR_OK) {
+                OH_LOG_INFO(LOG_APP, "Raw read finished: %{public}d", ret);
+                break; 
+            }
+
+            OH_AVCodecBufferAttr attr;
+            if (OH_AVBuffer_GetBufferAttr(buffer, &attr) != AV_ERR_OK) {
+                OH_LOG_ERROR(LOG_APP, "Failed to get raw buffer attr");
+                ok = false;
+                break;
+            }
+
+            // 看门狗检查：防止连续读取不到数据导致 CPU 空转
+            if (attr.size > 0) {
+                consecutiveNoDataCount = 0;
+            } else {
+                consecutiveNoDataCount++;
+                if (consecutiveNoDataCount > MAX_NO_DATA_RETRIES) {
+                    OH_LOG_ERROR(LOG_APP, "Stuck in loop without data (raw mode)");
+                    ok = false;
+                    break;
+                }
+            }
+
+            // 进度回调
+            if (progressCb) {
+                const int64_t ptsMs = attr.pts;
+                if (durationMs_ > 0 && ptsMs >= 0) {
+                     double p = (double)ptsMs / (durationMs_ * 1000.0);
+                     if (p > 1.0) p = 1.0;
+                     progressCb(p, ptsMs, durationMs_);
+                } else if (ptsMs >= 0) {
+                     progressCb(-1.0, ptsMs, 0);
+                }
+            }
+
+            // 数据回调
+            if (attr.size > 0 && pcmCb) {
+                uint8_t* addr = OH_AVBuffer_GetAddr(buffer);
+                if (addr) {
+                    if (!pcmCb(addr, attr.size, attr.pts)) {
+                        OH_LOG_INFO(LOG_APP, "PCM callback requested stop (raw mode)");
+                        ok = true; 
+                        break;
+                    }
+                }
+            }
+
+            if (attr.flags & AVCODEC_BUFFER_FLAGS_EOS) {
+                OH_LOG_INFO(LOG_APP, "Raw read EOS");
+                break;
+            }
+        }
+
+        OH_AVBuffer_Destroy(buffer);
+        cleanup();
+        return ok;
+    }
+
+    // 初始化硬件解码器
     if (!Initialize(audioCodecMime)) {
         reportError("init_decoder", -1, "Failed to initialize decoder");
         cleanup();
@@ -404,24 +509,26 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
     const int32_t finalChannelCount = (channelCount > 0) ? channelCount : ((detectedChannelCount_ > 0) ? detectedChannelCount_ : 2);
     const int32_t finalSampleFormat = 1; // S16LE
 
+    // 配置解码参数
     if (!Configure(finalSampleRate, finalChannelCount, bitrate)) {
         reportError("configure", -1, "Failed to configure decoder");
         cleanup();
         return false;
     }
 
+    // 启动解码器
     if (!Start()) {
         reportError("start", -1, "Failed to start decoder");
         cleanup();
         return false;
     }
 
-    // ready/info callback
+    // 回调通知上层音频参数
     if (infoCb) {
         infoCb(finalSampleRate, finalChannelCount, finalSampleFormat, durationMs_);
     }
 
-    // 6. 选择音频轨道
+    // 选择音频轨道
     if (OH_AVDemuxer_SelectTrackByID(demuxer, audioTrackIndex) != AV_ERR_OK) {
         reportError("select_track", -1, "Failed to select audio track");
         cleanup();
@@ -430,17 +537,16 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
     bool ok = false;
     bool inputEos = false;
-    int32_t loopCount = 0;
-
+    
+    // 循环解码流程
     while (true) {
-        loopCount++;
-
         if (cancelFlag_ && cancelFlag_->load()) {
             OH_LOG_INFO(LOG_APP, "Decode canceled");
             ok = true;
             break;
         }
 
+        // 推送输入数据到解码器
         if (!inputEos) {
             StepResult inRes = PushInputData(demuxer, audioTrackIndex, progressCb);
             if (inRes == StepResult::Eos) {
@@ -452,24 +558,19 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             }
         }
 
+        // 获取解码后的输出数据
         StepResult outRes = PopOutputData(pcmCb);
         if (outRes == StepResult::Eos) {
             ok = true;
             break;
         }
         if (outRes == StepResult::Error) {
-            // 如果是上层主动中止（pcmCb 返回 false），视为取消
+            // 如果上层回调返回 false，视为正常取消
             if (cancelFlag_ && cancelFlag_->load()) {
                 ok = true;
                 break;
             }
             reportError("pop_output", -1, "Failed to pop output data");
-            ok = false;
-            break;
-        }
-
-        if (loopCount > 100000) {
-            reportError("loop", -1, "Decode loop exceeded maximum iterations");
             ok = false;
             break;
         }
