@@ -100,7 +100,6 @@ equalizer.applyToDecoder(decoder);
 - **语言**：ArkTS (TypeScript for HarmonyOS)
 - **原生代码**：C++ (NAPI)
 - **音频框架**：OpenHarmony AudioKit
-- **解码库**：FFmpeg
 
 ## 许可证
 
