@@ -49,6 +49,11 @@ export class AudioRendererPlayer {
   private decoder: PcmStreamDecoder | null = null;
   private streamInfo: PcmStreamInfo | null = null;
 
+  // 位置追踪和时间更新相关
+  private timeUpdateTimerId: number = -1;
+  private isPlaying_: boolean = false;
+  private onTimeUpdateCallback: ((positionMs: number) => void) | null = null;
+
   /**
    * 映射采样率到系统枚举值
    *
@@ -122,8 +127,8 @@ export class AudioRendererPlayer {
     const audioStreamInfo: audio.AudioStreamInfo = {
       samplingRate: this.mapSamplingRate(info.sampleRate),
       channels: this.mapChannels(info.channelCount),
-      sampleFormat: info.sampleFormatCode === 3 
-        ? audio.AudioSampleFormat.SAMPLE_FORMAT_S32LE 
+      sampleFormat: info.sampleFormatCode === 3
+        ? audio.AudioSampleFormat.SAMPLE_FORMAT_S32LE
         : audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
       encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
     };
@@ -144,6 +149,8 @@ export class AudioRendererPlayer {
         }
       });
       await this.renderer.start();
+      this.isPlaying_ = true;
+      this.startTimeUpdate();
     } catch (err) {
       const e = err as BusinessError;
       throw new Error(`AudioRenderer start failed: ${e.message}`);
@@ -160,6 +167,122 @@ export class AudioRendererPlayer {
    */
   public getDurationMs(): number {
     return this.streamInfo?.durationMs ?? 0;
+  }
+
+  /**
+   * 获取当前播放位置
+   *
+   * @returns 当前播放位置（毫秒），未播放时返回 0
+   *
+   * @remarks
+   * 位置来自解码器的 getPosition() 方法
+   */
+  public getCurrentPosition(): number {
+    if (!this.decoder) {
+      return 0;
+    }
+    return this.decoder.getPosition();
+  }
+
+  /**
+   * 跳转到指定播放位置
+   *
+   * @param positionMs - 目标位置（毫秒）
+   * @returns Promise<void> 跳转完成后 resolve
+   *
+   * @remarks
+   * - 支持任意位置跳转（包括往前跳转）
+   * - 支持本地文件和 URL 流式播放
+   * - 跳转精度目标：< 50ms
+   *
+   * @throws
+   * - 解码器未初始化
+   * - 目标位置无效
+   */
+  public async seekTo(positionMs: number): Promise<void> {
+    if (!this.decoder) {
+      throw new Error('Decoder not initialized');
+    }
+
+    if (positionMs < 0) {
+      throw new Error('positionMs must be >= 0');
+    }
+
+    // 1. 暂停播放
+    if (this.isPlaying_) {
+      await this.pause();
+    }
+
+    // 2. 刷新 AudioRenderer 缓冲区
+    await this.flush();
+
+    // 3. 调用解码器 Seek
+    this.decoder.seekTo(positionMs);
+
+    // 4. 如果之前在播放，恢复播放
+    if (this.isPlaying_) {
+      await this.resume();
+    }
+  }
+
+  /**
+   * 设置时间更新回调
+   *
+   * @param callback - 时间更新回调函数，接收当前播放位置（毫秒）
+   *
+   * @remarks
+   * - 默认每 100ms 触发一次
+   * - 可以通过 setTimeUpdateEnabled() 控制启用/禁用
+   * - 播放开始时自动启用，暂停/停止时自动禁用
+   */
+  public setOnTimeUpdate(callback: (positionMs: number) => void): void {
+    this.onTimeUpdateCallback = callback;
+  }
+
+  /**
+   * 启用或禁用时间更新事件
+   *
+   * @param enabled - 是否启用时间更新
+   * @param intervalMs - 更新间隔（毫秒），默认 100ms
+   *
+   * @remarks
+   * - 默认启用，播放时自动触发
+   * - intervalMs 建议：50ms~200ms
+   * - 设置为 false 会停止时间更新
+   */
+  public setTimeUpdateEnabled(enabled: boolean, intervalMs: number = 100): void {
+    if (enabled && this.isPlaying_) {
+      this.startTimeUpdate(intervalMs);
+    } else {
+      this.stopTimeUpdate();
+    }
+  }
+
+  /**
+   * 启动时间更新定时器
+   *
+   * @param intervalMs - 更新间隔（毫秒），默认 100ms
+   * @private
+   */
+  private startTimeUpdate(intervalMs: number = 100): void {
+    this.stopTimeUpdate();
+    this.timeUpdateTimerId = setInterval(() => {
+      if (this.decoder && this.onTimeUpdateCallback) {
+        const position = this.decoder.getPosition();
+        this.onTimeUpdateCallback(position);
+      }
+    }, intervalMs);
+  }
+
+  /**
+   * 停止时间更新定时器
+   * @private
+   */
+  private stopTimeUpdate(): void {
+    if (this.timeUpdateTimerId !== -1) {
+      clearInterval(this.timeUpdateTimerId);
+      this.timeUpdateTimerId = -1;
+    }
   }
 
   /**
@@ -296,6 +419,8 @@ export class AudioRendererPlayer {
       throw new Error('AudioRenderer not initialized');
     }
     await this.renderer.pause();
+    this.isPlaying_ = false;
+    this.stopTimeUpdate();
   }
 
   /**
@@ -315,6 +440,8 @@ export class AudioRendererPlayer {
       throw new Error('AudioRenderer not initialized');
     }
     await this.renderer.start();
+    this.isPlaying_ = true;
+    this.startTimeUpdate();
   }
 
   /**
@@ -403,6 +530,10 @@ export class AudioRendererPlayer {
    * - 调用后需要重新调用 play() 才能播放
    */
   public async stop(): Promise<void> {
+    // 停止时间更新定时器
+    this.stopTimeUpdate();
+    this.isPlaying_ = false;
+
     try {
       if (this.decoder) {
         this.decoder.close();

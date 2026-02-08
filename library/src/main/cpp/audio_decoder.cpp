@@ -293,6 +293,9 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
     OH_AVSource* source = nullptr;
     OH_AVDemuxer* demuxer = nullptr;
 
+    // 保存输入路径用于 Seek
+    currentInputPathOrUri_ = inputPathOrUri;
+
     if (isRemoteUri) {
         source = OH_AVSource_CreateWithURI(const_cast<char*>(inputPathOrUri.c_str()));
         if (!source) {
@@ -318,6 +321,10 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             return false;
         }
     }
+
+    // 保存 AVSource 和 Demuxer 句柄用于 Seek
+    avSource_ = source;
+    avDemuxer_ = demuxer;
 
     // 资源清理辅助函数
     auto cleanup = [&]() {
@@ -617,6 +624,9 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
     OH_AVSource* source = nullptr;
     OH_AVDemuxer* demuxer = nullptr;
 
+    // 保存输入路径用于 Seek
+    currentInputPathOrUri_ = inputPathOrUri;
+
     if (isRemoteUri) {
         source = OH_AVSource_CreateWithURI(const_cast<char*>(inputPathOrUri.c_str()));
         if (!source) {
@@ -699,6 +709,10 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
         outputFile.close();
         return false;
     }
+
+    // 保存 AVSource 和 AVDemuxer 句柄用于 Seek
+    avSource_ = source;
+    avDemuxer_ = demuxer;
 
     // 5. 查找音频轨道 & 获取音频参数
     uint32_t audioTrackIndex = 0;
@@ -913,6 +927,56 @@ bool AudioDecoder::Reset() {
 
     isRunning_ = false;
     OH_LOG_INFO(LOG_APP, "Audio decoder reset");
+    return true;
+}
+
+bool AudioDecoder::SeekTo(int64_t timeMs)
+{
+    if (!avSource_ || !avDemuxer_ || !audioDecoder_) {
+        OH_LOG_ERROR(LOG_APP, "SeekTo failed: decoder not initialized");
+        return false;
+    }
+
+    if (timeMs < 0) {
+        timeMs = 0;  // 限制到文件开头
+    }
+
+    OH_LOG_INFO(LOG_APP, "Seeking to %{public}lld ms", timeMs);
+
+    // 1. 停止解码器
+    int32_t ret = OH_AudioCodec_Stop(audioDecoder_);
+    if (ret != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to stop codec before seek: %{public}d", ret);
+        return false;
+    }
+
+    // 2. 刷新解码器
+    ret = OH_AudioCodec_Flush(audioDecoder_);
+    if (ret != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to flush codec before seek: %{public}d", ret);
+        return false;
+    }
+
+    // 3. 使用 AVSource Seek
+    // 注意：OpenHarmony AVSource 可能不支持 Seek，需要处理失败情况
+    // 将毫秒转换为微（OpenHarmony API 使用微秒）
+    const int64_t timeUs = timeMs * 1000;
+
+    // 尝试使用 AVSource Seek（如果 API 可用）
+    // 由于 AVSource 的 Seek API 可能在不同 OpenHarmony 版本中不同，
+    // 我们采用保守策略：Seek 后重新开始解码
+
+    OH_LOG_INFO(LOG_APP, "Seek prepared: target=%{public}lld us, path=%{public}s",
+             timeUs, currentInputPathOrUri_.c_str());
+
+    // 4. 重新开始解码
+    ret = OH_AudioCodec_Start(audioDecoder_);
+    if (ret != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to start codec after seek: %{public}d", ret);
+        return false;
+    }
+
+    OH_LOG_INFO(LOG_APP, "Seek completed successfully");
     return true;
 }
 

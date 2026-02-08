@@ -84,6 +84,13 @@ public:
     // 重置解码器
     bool Reset();
 
+    /**
+     * @brief 跳转到指定时间点
+     * @param timeMs 目标时间（毫秒）
+     * @return 成功返回 true，失败返回 false
+     */
+    bool SeekTo(int64_t timeMs);
+
     // 销毁解码器
     void Destroy();
 
@@ -99,6 +106,12 @@ private:
     OH_AVFormat* format_;
     bool isRunning_;
     std::string currentMimeType_;
+
+    // 用于 Seek 功能
+    OH_AVSource* avSource_;
+    OH_AVDemuxer* avDemuxer_;
+    int32_t audioTrackIndex_;
+    std::string currentInputPathOrUri_;
 
     // 用于进度与参数自适应（仅在一次 Decode 调用期间有效）
     int64_t durationMs_;

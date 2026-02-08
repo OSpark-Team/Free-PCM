@@ -81,6 +81,17 @@ export interface PcmStreamDecoder {
   setEqEnabled: (enabled: boolean) => void;
   /** 设置均衡器增益 */
   setEqGains: (gainsDb: number[]) => void;
+  /**
+   * 跳转到指定播放位置
+   * @param positionMs 目标位置（毫秒）
+   * @returns void
+   */
+  seekTo: (positionMs: number) => void;
+  /**
+   * 获取当前播放位置
+   * @returns 当前位置（毫秒）
+   */
+  getPosition: () => number;
 }
 
 /**
