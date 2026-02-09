@@ -10,6 +10,9 @@ Free PCM 音频解码库 - 支持多种音频格式解码为 PCM，提供流式�
 - **异步接口**：Promise 异步接口和进度回调，不会阻塞 UI 线程
 - **HTTP/HTTPS 支持**：支持远程 URL 直接解码
 - **自动参数检测**：自动从媒体流获取采样率、声道数等参数
+- **完整 Seek + 位置查询**：支持前向/回溯跳转，并可查询当前内部播放位置（BufferClock）
+- **更稳的拉取供数（API 12+）**：writeData 回调支持 VALID/INVALID，不足时不消耗 ring，减少静音填充/丢音风险
+- **自适应缓冲区**：`ringBytes` 可选；不传时 native 侧按音频参数自适应选择 64KB~512KB（64KB 阶梯）
 
 ## 安装
 
@@ -36,7 +39,8 @@ const decoder = freePcm.createPcmStreamDecoder(
   {
     sampleRate: 44100,
     channelCount: 2,
-    ringBytes: 1024 * 1024, // 1MB 环形缓冲区
+    // ringBytes 可选：不传则启用自适应（64KB~512KB，64KB 阶梯）
+    // ringBytes: 256 * 1024,
     eqEnabled: true,
     eqGainsDb: EqPreset.Pop // 直接使用预设常量
   },
@@ -62,7 +66,9 @@ const audioStreamInfo: audio.AudioStreamInfo = {
                  audio.AudioSamplingRate.SAMPLE_RATE_48000,
   channels: info.channelCount === 1 ? audio.AudioChannel.CHANNEL_1 :
              audio.AudioChannel.CHANNEL_2,
-  sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
+  sampleFormat: info.sampleFormatCode === 3
+    ? audio.AudioSampleFormat.SAMPLE_FORMAT_S32LE
+    : audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
   encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
 };
 
@@ -80,8 +86,14 @@ const audioRenderer = await audio.createAudioRenderer(audioRendererOptions);
 
 // 设置 writeData 回调，从解码器拉取 PCM 数据
 audioRenderer.on('writeData', (buffer: ArrayBuffer) => {
-  const bytesWritten = decoder.fill(buffer);
-  // bytesWritten 是实际写入的有效字节数
+  // API 12+ 推荐：使用 fillForWriteData + VALID/INVALID（数据不足时不消耗 ring）
+  if (decoder.fillForWriteData) {
+    const n = decoder.fillForWriteData(buffer);
+    return n > 0 ? audio.AudioDataCallbackResult.VALID : audio.AudioDataCallbackResult.INVALID;
+  }
+
+  decoder.fill(buffer);
+  return audio.AudioDataCallbackResult.VALID;
 });
 
 // 启动播放
@@ -159,6 +171,13 @@ player.setVolumeWithRamp(0.0, 1000); // 1秒内渐变到静音
 
 // 停止播放
 await player.stop();
+
+// Seek（推荐用 await；URL 场景会等待 post-seek PCM ready）
+await player.seekTo(10_000);
+
+// 当前内部播放位置（BufferClock，基于 ringbuffer 推进）
+const posMs = player.getCurrentPosition();
+console.log('pos(ms):', posMs);
 ```
 
 ### 均衡器预设说明
@@ -266,7 +285,7 @@ decoder.setEqGains(equalizer.getGainsDb());
   - `sampleRate?: number` - 采样率（Hz），0 表示自动获取
   - `channelCount?: number` - 声道数，0 表示自动获取
   - `bitrate?: number` - 比特率（bps），0 表示不设置
-  - `ringBytes?: number` - 环形缓冲区大小（字节），默认 512KB
+  - `ringBytes?: number` - 环形缓冲区大小（字节）；不传/<=0 则自适应（64KB~512KB，64KB 阶梯）
   - `eqEnabled?: boolean` - 是否启用均衡器，默认 false
   - `eqGainsDb?: number[]` - 初始 10 段增益（-24 ~ +24 dB）
 
@@ -282,16 +301,21 @@ decoder.setEqGains(equalizer.getGainsDb());
 
 **方法：**
 - `fill(buffer: ArrayBuffer): number` - 填充 AudioRenderer 缓冲区
+- `fillForWriteData?(buffer: ArrayBuffer): number` - writeData 专用：数据不足返回 0（不消耗 ring）
 - `close(): void` - 请求停止解码
 - `setEqEnabled(enabled: boolean): void` - 启用/禁用均衡器
 - `setEqGains(gainsDb: number[]): void` - 设置 10 段均衡器增益
+
+ - `seekTo(positionMs: number): void` - 发起 Seek（异步生效）
+ - `seekToAsync?(positionMs: number): Promise<void>` - Seek 并等待 post-seek PCM ready
+ - `getPosition(): number` - 当前内部播放位置（ms）
 
 ### PcmStreamInfo
 
 流信息接口，包含：
 - `sampleRate: number` - 采样率（Hz）
 - `channelCount: number` - 声道数
-- `sampleFormat: string` - 采样格式（'s16le' 或 'unknown'）
+- `sampleFormat: string` - 采样格式（'s16le' / 's32le' / 'unknown'）
 - `durationMs: number` - 音频时长（毫秒），0 表示未知
 
 ### DecodeAudioProgress
@@ -340,6 +364,8 @@ decoder.setEqGains(equalizer.getGainsDb());
 - `setSpeed(speed): void` - 设置播放速度（0.25~4.0）
 - `getState(): AudioState` - 获取播放状态
 - `getDurationMs(): number` - 获取音频时长
+- `seekTo(positionMs: number): Promise<void>` - 跳转到指定位置（ms）
+- `getCurrentPosition(): number` - 获取当前内部位置（ms）
 - `getVolume(): number` - 获取当前音量
 - `getSpeed(): number` - 获取当前播放速度
 
@@ -351,6 +377,12 @@ decoder.setEqGains(equalizer.getGainsDb());
 - AAC (`audio/mp4a`)
 - OGG/Vorbis (`audio/vorbis`)
 - Opus (`audio/opus`)
+
+## 兼容性说明
+
+- `audio/raw`（常见 WAV）走 passthrough：不做采样格式转换。
+  - 如果源是 S16LE，但你在 options 里强制 `sampleFormat: 3`，库会忽略该请求并以源格式为准，避免 AudioRenderer 以错误样本宽度播放导致“二倍速/变调”。
+  - 如需“统一输出 S32LE（包括 WAV S16LE）”，需要引入显式的采样格式转换（会增加 CPU 开销，并需要同步升级/分流 EQ 处理链路）。
 
 ## 许可证
 

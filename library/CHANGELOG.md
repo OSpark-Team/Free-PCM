@@ -4,6 +4,23 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)
 
+## [1.0.1] - 2026-02-09
+
+### 新增
+
+- 完整 Seek：支持前向/回溯跳转，并新增 `seekToAsync()`（URL 场景等待 post-seek PCM ready 后 resolve）。
+- API 12+ writeData 支持 `fillForWriteData()` + VALID/INVALID 拉取模式（数据不足不消耗 ring）。
+- `ringBytes` 支持自适应：不传/<=0 时按音频参数（采样率/声道/位宽/时长/是否 URL）选择 64KB~512KB（64KB 阶梯）。
+
+### 变更
+
+- `DecodeAudioProgress.ptsMs/durationMs` 与 `PcmStreamInfo.durationMs` 语义统一为毫秒（ms）。
+
+### 修复
+
+- `audio/raw` passthrough（常见 WAV）使用源 PCM 的真实 sampleFormat，避免强制 s32le 导致“二倍速/变调”。
+- seek/flush 状态机稳定性修复（避免 codec 回调队列丢 index 导致卡死）。
+
 ## [1.0.0] - 2025-02-08
 
 ### 新增
