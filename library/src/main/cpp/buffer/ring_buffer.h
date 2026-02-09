@@ -46,6 +46,16 @@ public:
     bool IsEos() const;
 
     /**
+     * @brief 是否已标记 EOS（不要求缓冲区为空）
+     */
+    bool IsEosMarked() const;
+
+    /**
+     * @brief 当前缓冲区内可读取的数据量（字节）
+     */
+    size_t Available() const;
+
+    /**
      * @brief 向缓冲区推送数据
      * @param data 数据指针
      * @param len 数据长度
@@ -83,6 +93,14 @@ public:
      * @brief 重置位置计数器
      */
     void ResetCounters();
+
+    /**
+     * @brief 设置当前位置（毫秒）
+     *
+     * 该方法会通过修改内部已读字节计数器来实现“位置基线”，
+     * 便于 Seek 后让 GetPositionMs() 从目标时间点继续累加。
+     */
+    void SetPositionMs(uint64_t positionMs);
 
 private:
     mutable std::mutex mu_;

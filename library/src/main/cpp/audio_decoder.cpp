@@ -12,7 +12,8 @@
 
 AudioDecoder::AudioDecoder()
     : audioDecoder_(nullptr), signal_(nullptr), format_(nullptr), isRunning_(false), currentMimeType_(""),
-      durationMs_(0), detectedSampleRate_(0), detectedChannelCount_(0),
+      avSource_(nullptr), avDemuxer_(nullptr), audioTrackIndex_(-1), currentInputPathOrUri_(""),
+      durationMs_(0), detectedSampleRate_(0), detectedChannelCount_(0), detectedSampleFormat_(0),
       lastProgressPercent_(-1), lastProgressPtsMs_(-1), cancelFlag_(nullptr) {
 }
 
@@ -251,7 +252,9 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                                      const PcmDataCallback& pcmCb,
                                      const ErrorCallback& errorCb,
                                      CancelFlag* cancelFlag,
-                                     int32_t sampleFormat)
+                                     int32_t sampleFormat,
+                                     const SeekPollCallback& seekPollCb,
+                                     const SeekAppliedCallback& seekAppliedCb)
 {
     // 使用 RAII 机制自动清理 cancelFlag 指针
     struct CancelGuard {
@@ -322,10 +325,6 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         }
     }
 
-    // 保存 AVSource 和 Demuxer 句柄用于 Seek
-    avSource_ = source;
-    avDemuxer_ = demuxer;
-
     // 资源清理辅助函数
     auto cleanup = [&]() {
         if (demuxer) {
@@ -340,6 +339,11 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             close(fd);
             fd = -1;
         }
+
+        // Avoid leaving dangling handles.
+        avSource_ = nullptr;
+        avDemuxer_ = nullptr;
+        audioTrackIndex_ = -1;
     };
 
     // 获取源文件格式信息，包括轨道数和总时长
@@ -359,9 +363,10 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             return false;
         }
 
-        int64_t durationMs = 0;
-        if (OH_AVFormat_GetLongValue(sourceFormat, OH_MD_KEY_DURATION, &durationMs) && durationMs > 0) {
-            durationMs_ = durationMs;
+        // OH_MD_KEY_DURATION is typically in microseconds.
+        int64_t durationUs = 0;
+        if (OH_AVFormat_GetLongValue(sourceFormat, OH_MD_KEY_DURATION, &durationUs) && durationUs > 0) {
+            durationMs_ = durationUs / 1000;
         } else {
             durationMs_ = 0;
         }
@@ -375,6 +380,10 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         cleanup();
         return false;
     }
+
+    // Save handles for potential internal seek operations.
+    avSource_ = source;
+    avDemuxer_ = demuxer;
 
     // 遍历轨道查找音频流并解析参数
     uint32_t audioTrackIndex = 0;
@@ -410,6 +419,93 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         cleanup();
         return false;
     }
+
+    // Track index is needed for both decoding and seek.
+    audioTrackIndex_ = static_cast<int32_t>(audioTrackIndex);
+
+    // Seek/drop state (pts in microseconds per OH_AVCodecBufferAttr docs)
+    int64_t dropUntilPtsUs = -1;
+
+    auto clearSignalQueues = [&]() {
+        if (!signal_) {
+            return;
+        }
+
+        // IMPORTANT:
+        // The codec issues buffer indices via callbacks and expects the client
+        // to return them by calling PushInputBuffer/FreeOutputBuffer.
+        // Clearing these queues while the codec is running can drop indices and
+        // deadlock the pipeline. Only clear queues after stopping the codec.
+        {
+            std::lock_guard<std::mutex> lock(signal_->inMutex_);
+            while (!signal_->inQueue_.empty()) {
+                signal_->inQueue_.pop();
+            }
+            while (!signal_->inBufferQueue_.empty()) {
+                signal_->inBufferQueue_.pop();
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(signal_->outMutex_);
+            while (!signal_->outQueue_.empty()) {
+                signal_->outQueue_.pop();
+            }
+            while (!signal_->outBufferQueue_.empty()) {
+                signal_->outBufferQueue_.pop();
+            }
+        }
+    };
+
+    auto applySeek = [&](int64_t targetMs, uint64_t seq, bool codecRunning) {
+        if (targetMs < 0) {
+            targetMs = 0;
+        }
+
+        // For codec path, stop first to avoid dropping outstanding buffer indices.
+        if (codecRunning && audioDecoder_) {
+            const int32_t sret = OH_AudioCodec_Stop(audioDecoder_);
+            if (sret != AV_ERR_OK) {
+                reportError("seek_stop", sret, "OH_AudioCodec_Stop failed");
+                if (seekAppliedCb) {
+                    seekAppliedCb(seq, false, targetMs);
+                }
+                return;
+            }
+
+            clearSignalQueues();
+        }
+ 
+        // Seek demuxer to target position.
+        const OH_AVErrCode sret = OH_AVDemuxer_SeekToTime(demuxer, targetMs, SEEK_MODE_CLOSEST_SYNC);
+        if (sret != AV_ERR_OK) {
+            reportError("seek", static_cast<int32_t>(sret), "OH_AVDemuxer_SeekToTime failed");
+            if (seekAppliedCb) {
+                seekAppliedCb(seq, false, targetMs);
+            }
+            return;
+        }
+
+        if (codecRunning && audioDecoder_) {
+            // Flush codec buffers after seek (best effort), then restart.
+            (void)OH_AudioCodec_Flush(audioDecoder_);
+
+            const int32_t pret = OH_AudioCodec_Start(audioDecoder_);
+            if (pret != AV_ERR_OK) {
+                reportError("seek_start", pret, "OH_AudioCodec_Start failed");
+                if (seekAppliedCb) {
+                    seekAppliedCb(seq, false, targetMs);
+                }
+                return;
+            }
+        }
+ 
+        // Drop decoded PCM until reaching target timestamp.
+        dropUntilPtsUs = targetMs * 1000;
+
+        if (seekAppliedCb) {
+            seekAppliedCb(seq, true, targetMs);
+        }
+    };
 
     // 针对 audio/raw 格式（如 WAV）启用直通模式，绕过硬件解码器
     if (audioCodecMime == "audio/raw") {
@@ -450,6 +546,16 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                 OH_LOG_INFO(LOG_APP, "Decode canceled (raw mode)");
                 ok = true; 
                 break;
+            }
+
+            // Handle seek requests.
+            if (seekPollCb) {
+                int64_t targetMs = 0;
+                uint64_t seq = 0;
+                if (seekPollCb(targetMs, seq)) {
+                    applySeek(targetMs, seq, /*codecRunning*/ false);
+                    consecutiveNoDataCount = 0;
+                }
             }
 
             int32_t ret = OH_AVDemuxer_ReadSampleBuffer(demuxer, audioTrackIndex, buffer);
@@ -493,10 +599,16 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             if (attr.size > 0 && pcmCb) {
                 uint8_t* addr = OH_AVBuffer_GetAddr(buffer);
                 if (addr) {
-                    if (!pcmCb(addr, attr.size, attr.pts)) {
-                        OH_LOG_INFO(LOG_APP, "PCM callback requested stop (raw mode)");
-                        ok = true; 
-                        break;
+                    // If a seek just happened, drop old PCM before target.
+                    if (dropUntilPtsUs >= 0 && attr.pts >= 0 && attr.pts < dropUntilPtsUs) {
+                        // keep dropping
+                    } else {
+                        dropUntilPtsUs = -1;
+                        if (!pcmCb(addr, attr.size, attr.pts)) {
+                            OH_LOG_INFO(LOG_APP, "PCM callback requested stop (raw mode)");
+                            ok = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -560,6 +672,16 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             break;
         }
 
+        // Handle seek requests.
+        if (seekPollCb) {
+            int64_t targetMs = 0;
+            uint64_t seq = 0;
+            if (seekPollCb(targetMs, seq)) {
+                inputEos = false;
+                applySeek(targetMs, seq, /*codecRunning*/ true);
+            }
+        }
+
         // 推送输入数据到解码器
         if (!inputEos) {
             StepResult inRes = PushInputData(demuxer, audioTrackIndex, progressCb);
@@ -573,7 +695,19 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         }
 
         // 获取解码后的输出数据
-        StepResult outRes = PopOutputData(pcmCb);
+        StepResult outRes = PopOutputData([&](const uint8_t* data, size_t size, int64_t ptsUs) {
+            if (dropUntilPtsUs >= 0) {
+                if (ptsUs < 0) {
+                    // Unknown pts: stop dropping to avoid deadlock.
+                    dropUntilPtsUs = -1;
+                } else if (ptsUs < dropUntilPtsUs) {
+                    return true; // drop
+                } else {
+                    dropUntilPtsUs = -1;
+                }
+            }
+            return pcmCb ? pcmCb(data, size, ptsUs) : false;
+        });
         if (outRes == StepResult::Eos) {
             ok = true;
             break;
@@ -602,6 +736,7 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
     durationMs_ = 0;
     detectedSampleRate_ = 0;
     detectedChannelCount_ = 0;
+    detectedSampleFormat_ = 0;
     lastProgressPercent_ = -1;
     lastProgressPtsMs_ = -1;
 
@@ -683,9 +818,9 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
             return false;
         }
 
-        int64_t durationMs = 0;
-        if (OH_AVFormat_GetLongValue(sourceFormat, OH_MD_KEY_DURATION, &durationMs) && durationMs > 0) {
-            durationMs_ = durationMs;
+        int64_t durationUs = 0;
+        if (OH_AVFormat_GetLongValue(sourceFormat, OH_MD_KEY_DURATION, &durationUs) && durationUs > 0) {
+            durationMs_ = durationUs / 1000;
             OH_LOG_INFO(LOG_APP, "Duration: %{public}lld ms", (long long)durationMs_);
         } else {
             durationMs_ = 0;
@@ -759,6 +894,8 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
         outputFile.close();
         return false;
     }
+
+    audioTrackIndex_ = static_cast<int32_t>(audioTrackIndex);
 
     // 6. 初始化/配置/启动解码器
     if (!Initialize(audioCodecMime)) {
@@ -851,6 +988,9 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
     demuxer = nullptr;
     OH_AVSource_Destroy(source);
     source = nullptr;
+    avSource_ = nullptr;
+    avDemuxer_ = nullptr;
+    audioTrackIndex_ = -1;
     if (fd >= 0) {
         close(fd);
     }
@@ -943,36 +1083,45 @@ bool AudioDecoder::SeekTo(int64_t timeMs)
 
     OH_LOG_INFO(LOG_APP, "Seeking to %{public}lld ms", timeMs);
 
-    // 1. 停止解码器
-    int32_t ret = OH_AudioCodec_Stop(audioDecoder_);
-    if (ret != AV_ERR_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to stop codec before seek: %{public}d", ret);
+    // Stop first so the codec can reclaim any outstanding buffers.
+    const int32_t stopRet = OH_AudioCodec_Stop(audioDecoder_);
+    if (stopRet != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to stop codec before seek: %{public}d", stopRet);
         return false;
     }
 
-    // 2. 刷新解码器
-    ret = OH_AudioCodec_Flush(audioDecoder_);
-    if (ret != AV_ERR_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to flush codec before seek: %{public}d", ret);
+    // 1. Seek demuxer
+    const OH_AVErrCode seekRet = OH_AVDemuxer_SeekToTime(avDemuxer_, timeMs, SEEK_MODE_CLOSEST_SYNC);
+    if (seekRet != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to seek demuxer: %{public}d", static_cast<int32_t>(seekRet));
         return false;
     }
 
-    // 3. 使用 AVSource Seek
-    // 注意：OpenHarmony AVSource 可能不支持 Seek，需要处理失败情况
-    // 将毫秒转换为微（OpenHarmony API 使用微秒）
-    const int64_t timeUs = timeMs * 1000;
+    // 2. Flush codec buffers to discard pre-seek frames
+    const int32_t fret = OH_AudioCodec_Flush(audioDecoder_);
+    if (fret != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to flush codec after seek: %{public}d", fret);
+        return false;
+    }
 
-    // 尝试使用 AVSource Seek（如果 API 可用）
-    // 由于 AVSource 的 Seek API 可能在不同 OpenHarmony 版本中不同，
-    // 我们采用保守策略：Seek 后重新开始解码
+    // 3. Clear callback queues (safe after Stop)
+    if (signal_) {
+        {
+            std::lock_guard<std::mutex> lock(signal_->inMutex_);
+            while (!signal_->inQueue_.empty()) signal_->inQueue_.pop();
+            while (!signal_->inBufferQueue_.empty()) signal_->inBufferQueue_.pop();
+        }
+        {
+            std::lock_guard<std::mutex> lock(signal_->outMutex_);
+            while (!signal_->outQueue_.empty()) signal_->outQueue_.pop();
+            while (!signal_->outBufferQueue_.empty()) signal_->outBufferQueue_.pop();
+        }
+    }
 
-    OH_LOG_INFO(LOG_APP, "Seek prepared: target=%{public}lld us, path=%{public}s",
-             timeUs, currentInputPathOrUri_.c_str());
-
-    // 4. 重新开始解码
-    ret = OH_AudioCodec_Start(audioDecoder_);
-    if (ret != AV_ERR_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to start codec after seek: %{public}d", ret);
+    // 4. Restart
+    const int32_t pret = OH_AudioCodec_Start(audioDecoder_);
+    if (pret != AV_ERR_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to start codec after seek: %{public}d", pret);
         return false;
     }
 
@@ -1108,9 +1257,11 @@ AudioDecoder::StepResult AudioDecoder::PushInputData(OH_AVDemuxer* demuxer, uint
         return StepResult::Error;
     }
 
+    // OH_AVCodecBufferAttr::pts is in microseconds.
+    const int64_t ptsMs = (attr.pts >= 0) ? (attr.pts / 1000) : attr.pts;
+
     // 进度上报（节流）
     if (progressCb) {
-        const int64_t ptsMs = attr.pts;
         if (durationMs_ > 0 && ptsMs >= 0) {
             int32_t percent = static_cast<int32_t>((ptsMs * 100) / durationMs_);
             if (percent < 0) {

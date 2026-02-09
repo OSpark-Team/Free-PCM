@@ -22,6 +22,7 @@ enum class DecoderEventType {
     Ready = 0,      ///< 解码器就绪
     Progress = 1,   ///< 进度更新
     Error = 2,      ///< 错误发生
+    Seek = 3,       ///< Seek 结果（用于 Promise resolve/reject）
 };
 
 /**
@@ -44,6 +45,11 @@ struct DecoderEventPayload {
     std::string stage;
     int32_t code;
     std::string message;
+
+    // Seek 事件数据
+    uint64_t seekSeq = 0;
+    int64_t seekTargetMs = 0;
+    bool seekSuccess = false;
 };
 
 // ============================================================================
@@ -92,6 +98,10 @@ struct PcmStreamDecoderContext {
     napi_deferred readyDeferred;
     napi_deferred doneDeferred;
 
+    // seekToAsync promise
+    napi_deferred seekDeferred;
+    uint64_t seekDeferredSeq;
+
     napi_ref selfRef;
     napi_ref onProgressRef;
     napi_ref onErrorRef;
@@ -133,10 +143,16 @@ struct PcmStreamDecoderContext {
     int32_t actualSampleFormat;
 
     // Seek 功能相关
-    std::atomic<bool> isSeeking_;     // 是否正在 Seek
-    std::atomic<int64_t> targetPositionMs_;  // 目标 Seek 位置（毫秒）
-    std::mutex seekMutex_;              // Seek 操作的互斥锁
-    int64_t currentSeekPositionMs_;     // 当前 Seek 位置（用于解码线程判断）
+    // Note: We use a monotonically increasing sequence so frequent seeks are
+    // coalesced and the decode thread can apply only the latest one.
+    std::atomic<uint64_t> seekSeq_;          // last requested seek sequence
+    std::atomic<uint64_t> seekHandledSeq_;   // last handled seek sequence
+    std::atomic<int64_t> targetPositionMs_;  // target seek position (ms)
+    std::mutex seekMutex_;                  // protects target+seq updates
+
+    // For seekToAsync: resolved when first post-seek PCM is produced.
+    std::atomic<bool> seekAwaitOutput;
+    std::atomic<uint64_t> seekAwaitSeq;
 };
 
 #endif // DECODER_TYPES_H

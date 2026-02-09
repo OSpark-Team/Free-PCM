@@ -75,6 +75,13 @@ export interface PcmStreamDecoder {
    * @returns 实际填充的字节数
    */
   fill: (buffer: ArrayBuffer) => number;
+
+  /**
+   * 用于 AudioRenderer.on('writeData') 的"不消费"填充模式（API 12+ 推荐）
+   * - 数据不足时返回 0（调用方可返回 INVALID，让系统稍后再拉取）
+   * - 数据充足或 EOS 尾帧时返回 buffer.byteLength（不足部分会自动补 0）
+   */
+  fillForWriteData?: (buffer: ArrayBuffer) => number;
   /** 关闭解码器并释放资源 */
   close: () => void;
   /** 设置均衡器开关状态 */
@@ -87,6 +94,12 @@ export interface PcmStreamDecoder {
    * @returns void
    */
   seekTo: (positionMs: number) => void;
+
+  /**
+   * 异步 Seek：只有当解码线程已完成 Seek 且产出首个目标位置后的 PCM 数据时才 resolve。
+   * 对 URL 场景等价于“等网络/解码追上目标点”，便于上层做 Buffering 体验。
+   */
+  seekToAsync?: (positionMs: number) => Promise<void>;
   /**
    * 获取当前播放位置
    * @returns 当前位置（毫秒）

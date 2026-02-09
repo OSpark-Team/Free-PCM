@@ -116,9 +116,46 @@ void CallJsDecoderEvent(napi_env env, napi_value /*jsCb*/, void* context, void* 
 
             break;
         }
+        case DecoderEventType::Seek: {
+            if (ctx->seekDeferred == nullptr) {
+                break;
+            }
+            if (ctx->seekDeferredSeq != payload->seekSeq) {
+                break;
+            }
+
+            if (payload->seekSuccess) {
+                napi_value undef;
+                napi_get_undefined(env, &undef);
+                napi_resolve_deferred(env, ctx->seekDeferred, undef);
+            } else {
+                napi_value errObj = napi_utils::CreateErrorObject(env, "seek", payload->code, payload->message);
+                napi_reject_deferred(env, ctx->seekDeferred, errObj);
+            }
+            ctx->seekDeferred = nullptr;
+            break;
+        }
         default:
             break;
     }
+}
+
+static void QueueSeekEvent(PcmStreamDecoderContext* ctx, uint64_t seq, bool success, int32_t code,
+                           const std::string& message, int64_t targetMs)
+{
+    if (!ctx || ctx->eventTsfn == nullptr) {
+        return;
+    }
+
+    auto* payload = new DecoderEventPayload();
+    payload->type = DecoderEventType::Seek;
+    payload->seekSeq = seq;
+    payload->seekTargetMs = targetMs;
+    payload->seekSuccess = success;
+    payload->code = code;
+    payload->message = message;
+
+    (void)napi_call_threadsafe_function(ctx->eventTsfn, payload, napi_tsfn_nonblocking);
 }
 
 // ============================================================================
@@ -164,6 +201,66 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info)
     napi_value out;
     napi_create_int32(env, static_cast<int32_t>(n), &out);
     return out;
+}
+
+// For AudioRenderer.on('writeData') (API 12+):
+// - return 0 when not enough data, so caller can return INVALID without consuming the ring
+// - return full buffer length when enough data, or when EOS is marked (with padding)
+napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void* data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "fillForWriteData(buffer) requires 1 argument");
+        return nullptr;
+    }
+
+    bool isArrayBuffer = false;
+    napi_is_arraybuffer(env, args[0], &isArrayBuffer);
+    if (!isArrayBuffer) {
+        napi_throw_error(env, nullptr, "fillForWriteData(buffer) expects an ArrayBuffer");
+        return nullptr;
+    }
+
+    void* buf = nullptr;
+    size_t len = 0;
+    napi_get_arraybuffer_info(env, args[0], &buf, &len);
+    if (!buf || len == 0) {
+        napi_value zero;
+        napi_create_int32(env, 0, &zero);
+        return zero;
+    }
+
+    if (!ctx->ring) {
+        napi_value zero;
+        napi_create_int32(env, 0, &zero);
+        return zero;
+    }
+
+    const size_t avail = ctx->ring->Available();
+    if (avail >= len) {
+        (void)ctx->ring->Read(reinterpret_cast<uint8_t*>(buf), len);
+        napi_value out;
+        napi_create_int32(env, static_cast<int32_t>(len), &out);
+        return out;
+    }
+
+    if (ctx->ring->IsEosMarked() && avail > 0) {
+        const size_t n = ctx->ring->Read(reinterpret_cast<uint8_t*>(buf), avail);
+        if (n < len) {
+            memset(reinterpret_cast<uint8_t*>(buf) + n, 0, len - n);
+        }
+        napi_value out;
+        napi_create_int32(env, static_cast<int32_t>(len), &out);
+        return out;
+    }
+
+    napi_value zero;
+    napi_create_int32(env, 0, &zero);
+    return zero;
 }
 
 napi_value PcmDecoderClose(napi_env env, napi_callback_info info)
@@ -281,7 +378,22 @@ napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info)
     }
 
     int64_t positionMs = 0;
-    napi_get_value_int64(env, args[0], &positionMs);
+    {
+        napi_status st = napi_get_value_int64(env, args[0], &positionMs);
+        if (st != napi_ok) {
+            double d = 0.0;
+            if (napi_get_value_double(env, args[0], &d) == napi_ok) {
+                positionMs = static_cast<int64_t>(std::llround(d));
+            } else {
+                int32_t i = 0;
+                if (napi_get_value_int32(env, args[0], &i) != napi_ok) {
+                    napi_throw_error(env, nullptr, "positionMs must be a number");
+                    return nullptr;
+                }
+                positionMs = static_cast<int64_t>(i);
+            }
+        }
+    }
 
     // 验证位置范围
     if (positionMs < 0) {
@@ -291,20 +403,87 @@ napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info)
 
     OH_LOG_INFO(LOG_APP, "PcmDecoderSeekTo called: positionMs=%{public}lld", positionMs);
 
-    // 设置 Seek 标志和目标位置
-    ctx->isSeeking_.store(true);
-    ctx->targetPositionMs_.store(positionMs);
-    ctx->currentSeekPositionMs_ = positionMs;
+    // Request a seek to be applied by the decode thread.
+    // We clear the ring immediately to stop feeding old PCM after renderer.flush().
+    {
+        std::lock_guard<std::mutex> lock(ctx->seekMutex_);
+        ctx->targetPositionMs_.store(positionMs);
+        // Increment after writing the target to keep reads consistent.
+        (void)ctx->seekSeq_.fetch_add(1);
+    }
 
-    // 清空环形缓冲区并重置计数器
     if (ctx->ring) {
         ctx->ring->Clear();
-        ctx->ring->ResetCounters();
     }
 
     napi_value undef;
     napi_get_undefined(env, &undef);
     return undef;
+}
+
+napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void* data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "seekToAsync(positionMs) requires 1 argument");
+        return nullptr;
+    }
+
+    int64_t positionMs = 0;
+    {
+        // ArkTS number may arrive as double on some runtimes.
+        napi_status st = napi_get_value_int64(env, args[0], &positionMs);
+        if (st != napi_ok) {
+            double d = 0.0;
+            if (napi_get_value_double(env, args[0], &d) == napi_ok) {
+                positionMs = static_cast<int64_t>(std::llround(d));
+            } else {
+                int32_t i = 0;
+                if (napi_get_value_int32(env, args[0], &i) != napi_ok) {
+                    napi_throw_error(env, nullptr, "positionMs must be a number");
+                    return nullptr;
+                }
+                positionMs = static_cast<int64_t>(i);
+            }
+        }
+    }
+    if (positionMs < 0) {
+        napi_throw_error(env, nullptr, "positionMs must be >= 0");
+        return nullptr;
+    }
+
+    napi_deferred deferred;
+    napi_value promise;
+    napi_create_promise(env, &deferred, &promise);
+
+    // Reject previous pending seek promise if any.
+    if (ctx->seekDeferred != nullptr) {
+        napi_value errObj = napi_utils::CreateErrorObject(env, "seek", -2, "Seek was superseded by a new seek request");
+        napi_reject_deferred(env, ctx->seekDeferred, errObj);
+        ctx->seekDeferred = nullptr;
+    }
+
+    uint64_t seq = 0;
+    {
+        std::lock_guard<std::mutex> lock(ctx->seekMutex_);
+        ctx->targetPositionMs_.store(positionMs);
+        seq = ctx->seekSeq_.fetch_add(1) + 1;
+    }
+
+    ctx->seekDeferred = deferred;
+    ctx->seekDeferredSeq = seq;
+    ctx->seekAwaitSeq.store(seq);
+    ctx->seekAwaitOutput.store(true);
+
+    if (ctx->ring) {
+        ctx->ring->Clear();
+    }
+
+    return promise;
 }
 
 napi_value PcmDecoderGetPosition(napi_env env, napi_callback_info info)
@@ -412,6 +591,22 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
             return false;
         }
 
+        // While a seek is pending (requested but not handled), drop PCM output.
+        // This avoids pushing "old" audio (especially for backward seeks).
+        if (ctx->seekSeq_.load() != ctx->seekHandledSeq_.load()) {
+            return true;
+        }
+
+        // If seekToAsync is waiting for first post-seek PCM, resolve it now.
+        if (ctx->seekAwaitOutput.load()) {
+            const uint64_t awaitSeq = ctx->seekAwaitSeq.load();
+            if (awaitSeq != 0 && awaitSeq == ctx->seekHandledSeq_.load()) {
+                if (ctx->seekAwaitOutput.exchange(false)) {
+                    QueueSeekEvent(ctx, awaitSeq, true, 0, "", ctx->targetPositionMs_.load());
+                }
+            }
+        }
+
         const bool eqEnabled = ctx->eqEnabled.load();
         if (!eqEnabled || !ctx->eq.IsReady() || size < 2) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
@@ -470,6 +665,40 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         }
     };
 
+    AudioDecoder::SeekPollCallback seekPollCb = [ctx](int64_t& targetMs, uint64_t& seq) {
+        const uint64_t req = ctx->seekSeq_.load();
+        const uint64_t handled = ctx->seekHandledSeq_.load();
+        if (req == handled) {
+            return false;
+        }
+        // targetPositionMs_ is written before seekSeq_ increment in seekTo().
+        targetMs = ctx->targetPositionMs_.load();
+        seq = req;
+        return true;
+    };
+
+    AudioDecoder::SeekAppliedCallback seekAppliedCb = [ctx](uint64_t seq, bool success, int64_t targetMs) {
+        // Always advance handled seq so PCM output can resume.
+        ctx->seekHandledSeq_.store(seq);
+
+        if (!success) {
+            if (ctx->seekAwaitOutput.exchange(false)) {
+                QueueSeekEvent(ctx, seq, false, -1, "Seek failed", targetMs);
+            }
+            return;
+        }
+        if (!ctx->ring) {
+            return;
+        }
+
+        // Reset ring buffer to align position with target time.
+        ctx->ring->Clear();
+        ctx->ring->SetPositionMs(targetMs < 0 ? 0 : static_cast<uint64_t>(targetMs));
+
+        // For seekToAsync: ensure await seq matches this seek request.
+        ctx->seekAwaitSeq.store(seq);
+    };
+
     bool ok = decoder.DecodeToPcmStream(
         ctx->inputPathOrUri,
         ctx->sampleRate,
@@ -480,7 +709,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         pcmCb,
         errorCb,
         &ctx->cancel,
-        ctx->sampleFormat);
+        ctx->sampleFormat,
+        seekPollCb,
+        seekAppliedCb);
 
     ctx->success = ok;
     if (ctx->ring) {
@@ -520,6 +751,12 @@ void CompletePcmStreamDecode(napi_env env, napi_status /*status*/, void* data)
             napi_reject_deferred(env, ctx->doneDeferred, errObj);
         }
         ctx->doneDeferred = nullptr;
+    }
+
+    if (ctx->seekDeferred != nullptr) {
+        napi_value errObj = napi_utils::CreateErrorObject(env, "seek", -1, "Decoder finished before seek became ready");
+        napi_reject_deferred(env, ctx->seekDeferred, errObj);
+        ctx->seekDeferred = nullptr;
     }
 
     if (ctx->eventTsfn != nullptr) {
@@ -716,10 +953,14 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     ctx->eqSampleRate = 0;
     ctx->eqChannelCount = 0;
 
-    // 初始化 Seek 相关变量
-    ctx->isSeeking_.store(false);
+    // Initialize seek state.
+    ctx->seekSeq_.store(0);
+    ctx->seekHandledSeq_.store(0);
     ctx->targetPositionMs_.store(0);
-    ctx->currentSeekPositionMs_ = 0;
+    ctx->seekDeferred = nullptr;
+    ctx->seekDeferredSeq = 0;
+    ctx->seekAwaitOutput.store(false);
+    ctx->seekAwaitSeq.store(0);
 
     // 保存初始参数，用于在 ready 回调中重新创建 PcmRingBuffer
     ctx->ringBytes = ringBytes;
@@ -786,6 +1027,10 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     napi_create_function(env, "fill", NAPI_AUTO_LENGTH, PcmDecoderFill, ctx, &fillFn);
     napi_set_named_property(env, decoderObj, "fill", fillFn);
 
+    napi_value fillForWriteDataFn;
+    napi_create_function(env, "fillForWriteData", NAPI_AUTO_LENGTH, PcmDecoderFillForWriteData, ctx, &fillForWriteDataFn);
+    napi_set_named_property(env, decoderObj, "fillForWriteData", fillForWriteDataFn);
+
     napi_value closeFn;
     napi_create_function(env, "close", NAPI_AUTO_LENGTH, PcmDecoderClose, ctx, &closeFn);
     napi_set_named_property(env, decoderObj, "close", closeFn);
@@ -802,6 +1047,10 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     napi_value seekToFn;
     napi_create_function(env, "seekTo", NAPI_AUTO_LENGTH, PcmDecoderSeekTo, ctx, &seekToFn);
     napi_set_named_property(env, decoderObj, "seekTo", seekToFn);
+
+    napi_value seekToAsyncFn;
+    napi_create_function(env, "seekToAsync", NAPI_AUTO_LENGTH, PcmDecoderSeekToAsync, ctx, &seekToAsyncFn);
+    napi_set_named_property(env, decoderObj, "seekToAsync", seekToAsyncFn);
 
     napi_value getPositionFn;
     napi_create_function(env, "getPosition", NAPI_AUTO_LENGTH, PcmDecoderGetPosition, ctx, &getPositionFn);

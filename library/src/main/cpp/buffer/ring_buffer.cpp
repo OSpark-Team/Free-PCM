@@ -33,6 +33,18 @@ bool PcmRingBuffer::IsEos() const
     return eos_ && size_ == 0;
 }
 
+bool PcmRingBuffer::IsEosMarked() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return eos_;
+}
+
+size_t PcmRingBuffer::Available() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return size_;
+}
+
 bool PcmRingBuffer::Push(const uint8_t* data, size_t len, const std::atomic<bool>* cancelFlag)
 {
     if (data == nullptr || len == 0) {
@@ -139,6 +151,27 @@ uint64_t PcmRingBuffer::GetPositionMs() const
 void PcmRingBuffer::ResetCounters()
 {
     totalBytesRead_.store(0);
+}
+
+void PcmRingBuffer::SetPositionMs(uint64_t positionMs)
+{
+    if (sampleRate_ <= 0 || channels_ <= 0 || bytesPerSample_ <= 0) {
+        totalBytesRead_.store(0);
+        return;
+    }
+
+    // Convert ms -> samples -> bytes. Use wide intermediate to avoid overflow.
+    const unsigned __int128 samples = (static_cast<unsigned __int128>(positionMs) *
+                                       static_cast<unsigned __int128>(sampleRate_)) /
+                                      1000u;
+    const unsigned __int128 bytes = samples *
+                                    static_cast<unsigned __int128>(channels_) *
+                                    static_cast<unsigned __int128>(bytesPerSample_);
+
+    const uint64_t capped = (bytes > static_cast<unsigned __int128>(UINT64_MAX))
+                                ? UINT64_MAX
+                                : static_cast<uint64_t>(bytes);
+    totalBytesRead_.store(capped);
 }
 
 } // namespace audio

@@ -143,10 +143,23 @@ export class AudioRendererPlayer {
 
     try {
       this.renderer = await audio.createAudioRenderer(audioRendererOptions);
+
+      // API 12+: writeData callback can return VALID/INVALID.
       this.renderer.on('writeData', (buffer: ArrayBuffer) => {
-        if (this.decoder) {
-          this.decoder.fill(buffer);
+        const d = this.decoder;
+        if (!d) {
+          return audio.AudioDataCallbackResult.INVALID;
         }
+
+        // Preferred on API 12+: only consume ring when we can fully fill.
+        if (d.fillForWriteData) {
+          const n = d.fillForWriteData(buffer);
+          return n > 0 ? audio.AudioDataCallbackResult.VALID : audio.AudioDataCallbackResult.INVALID;
+        }
+
+        // Fallback (legacy): consumes and pads with zeros, always treated as valid.
+        d.fill(buffer);
+        return audio.AudioDataCallbackResult.VALID;
       });
       await this.renderer.start();
       this.isPlaying_ = true;
@@ -208,8 +221,10 @@ export class AudioRendererPlayer {
       throw new Error('positionMs must be >= 0');
     }
 
+    const wasPlaying = this.isPlaying_;
+
     // 1. 暂停播放
-    if (this.isPlaying_) {
+    if (wasPlaying) {
       await this.pause();
     }
 
@@ -217,10 +232,15 @@ export class AudioRendererPlayer {
     await this.flush();
 
     // 3. 调用解码器 Seek
-    this.decoder.seekTo(positionMs);
+    // Prefer async variant so URL seeks can wait until post-seek data is ready.
+    if (this.decoder.seekToAsync) {
+      await this.decoder.seekToAsync(positionMs);
+    } else {
+      this.decoder.seekTo(positionMs);
+    }
 
     // 4. 如果之前在播放，恢复播放
-    if (this.isPlaying_) {
+    if (wasPlaying) {
       await this.resume();
     }
   }

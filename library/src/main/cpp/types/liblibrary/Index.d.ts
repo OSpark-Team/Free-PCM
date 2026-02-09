@@ -34,10 +34,14 @@ export type PcmStreamInfo = {
   channelCount: number;
   /**
    * 采样格式
-   * - 's16le': 16位小端PCM（当前仅支持此格式）
+   * - 's16le': 16位小端PCM
+   * - 's32le': 32位小端PCM
    * - 'unknown': 未知格式
    */
-  sampleFormat: 's16le' | 'unknown';
+  sampleFormat: 's16le' | 's32le' | 'unknown';
+
+  /** 采样格式编码：1=S16LE, 3=S32LE */
+  sampleFormatCode: number;
   /** 音频时长（毫秒），0 表示未知 */
   durationMs: number;
 };
@@ -68,6 +72,13 @@ export type PcmStreamDecoderOptions = {
    * - 通常不需要手动设置此参数
    */
   bitrate?: number;
+
+  /**
+   * 输出采样格式
+   * - 1: S16LE
+   * - 3: S32LE
+   */
+  sampleFormat?: number;
 
   /**
    * 内部 PCM 环形缓冲区大小（字节）
@@ -205,6 +216,12 @@ export type PcmStreamDecoder = {
   fill: (buffer: ArrayBuffer) => number;
 
   /**
+   * For AudioRenderer.on('writeData') (API 12+): only consumes when buffer can be fully filled.
+   * Returns 0 when not enough data (caller may return INVALID).
+   */
+  fillForWriteData?: (buffer: ArrayBuffer) => number;
+
+  /**
    * 请求停止解码
    *
    * - 调用后，done 将 resolve
@@ -259,6 +276,21 @@ export type PcmStreamDecoder = {
    * ```
    */
   setEqGains: (gainsDb: number[]) => void;
+
+  /**
+   * 跳转到指定播放位置（毫秒）
+   */
+  seekTo: (positionMs: number) => void;
+
+  /**
+   * Async seek that resolves when post-seek PCM is ready.
+   */
+  seekToAsync?: (positionMs: number) => Promise<void>;
+
+  /**
+   * 获取当前播放位置（毫秒）
+   */
+  getPosition: () => number;
 };
 
 /**

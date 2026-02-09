@@ -44,6 +44,12 @@ public:
     using ErrorCallback = std::function<void(const std::string& stage, int32_t code, const std::string& message)>;
     using CancelFlag = std::atomic<bool>;
 
+    // Seek coordination between JS thread and decode thread.
+    // - pollCb: called from decode thread to check whether a new seek request exists.
+    // - appliedCb: called after the seek attempt is applied (success or failure).
+    using SeekPollCallback = std::function<bool(int64_t& targetMs, uint64_t& seq)>;
+    using SeekAppliedCallback = std::function<void(uint64_t seq, bool success, int64_t targetMs)>;
+
     AudioDecoder();
     ~AudioDecoder();
 
@@ -73,7 +79,9 @@ public:
                            const PcmDataCallback& pcmCb,
                            const ErrorCallback& errorCb,
                            CancelFlag* cancelFlag,
-                           int32_t sampleFormat = 1);
+                           int32_t sampleFormat = 1,
+                           const SeekPollCallback& seekPollCb = SeekPollCallback(),
+                           const SeekAppliedCallback& seekAppliedCb = SeekAppliedCallback());
 
     // 停止解码
     bool Stop();
@@ -117,6 +125,7 @@ private:
     int64_t durationMs_;
     int32_t detectedSampleRate_;
     int32_t detectedChannelCount_;
+    int32_t detectedSampleFormat_;
 
     int32_t lastProgressPercent_;
     int64_t lastProgressPtsMs_;

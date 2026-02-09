@@ -39,6 +39,14 @@ void CallJsDecoderEvent(
 napi_value PcmDecoderFill(napi_env env, napi_callback_info info);
 
 /**
+ * @brief 专用于 AudioRenderer.on('writeData') 的填充方法（API 12+）
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return 0=数据不足（建议返回 INVALID），否则返回 buffer.byteLength
+ */
+napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info);
+
+/**
  * @brief 关闭流式解码器
  * @param env NAPI 环境
  * @param info 回调信息
@@ -73,6 +81,14 @@ napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info);
  * @return undefined
  */
 napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info);
+
+/**
+ * @brief 异步跳转到指定播放位置
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return Promise<void>
+ */
+napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info);
 
 /**
  * @brief 获取当前播放位置
