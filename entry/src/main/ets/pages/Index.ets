@@ -6,7 +6,10 @@ import {
   PcmDecoderTool,
   PcmEqualizer,
   PcmStreamDecoder
-} from '@okysu/free-pcm';
+} from '@ospark/free-pcm';
+import { fileUri, picker } from '@kit.CoreFileKit';
+
+import { fileIo as fs } from '@kit.CoreFileKit';
 
 // --- 常量定义 ---
 export enum EqPresetId {
@@ -65,6 +68,7 @@ export const EQ_PRESET_LIST: EqPreset[] = Object.keys(EQ_PRESET_MAP).map((key) =
 @Entry
 @Component
 struct Index {
+  @State downloadUri: string = '';
   // --- UI 状态变量 ---
   @State message: string = '音频解码测试';
   @State status: string = '待机状态';
@@ -176,13 +180,56 @@ struct Index {
     return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   }
 
+  /**
+   * 初始化并获取用户选择的下载目录 URI
+   * @returns {Promise<boolean>} 是否成功获取目录
+   */
+  public async initDownloadDirectory(): Promise<boolean> {
+
+    if (this.downloadUri) return true;
+
+    try {
+      const documentViewPicker = new picker.DocumentViewPicker(this.getUIContext().getHostContext()!);
+      const documentSaveOptions = new picker.DocumentSaveOptions();
+      documentSaveOptions.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
+
+      const documentSaveResult = await documentViewPicker.save(documentSaveOptions);
+      this.downloadUri = documentSaveResult[0];
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
   // --- 核心方法：播放逻辑 ---
   async playUrl() {
     if (this.isDecoding || this.isPlaying) return;
-    const url = this.url.trim();
+    let url = this.url.trim();
     if (!url) {
       promptAction.showToast({ message: '请输入有效 URL', duration: 2000 });
       return;
+    }
+
+    this.player.getAudioTimeNs();
+
+    // 如果输入的是test则测试本地文件播放
+    if (url == "test") {
+      await this.initDownloadDirectory();
+      // 读取 Rawfile
+      const fileData = await this.getUIContext().getHostContext()?.resourceManager.getRawFileContent('test.flac');
+
+      if (!fileData) {
+        promptAction.showToast({ message: '读取 Rawfile 失败', duration: 2000 });
+        return;
+      }
+
+      // 建立临时输入文件
+      const tempInputPath = this.getUIContext().getHostContext()?.filesDir + '/temp_input.flac';
+      const inputFile = fs.openSync(tempInputPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY);
+      fs.writeSync(inputFile.fd, fileData.buffer);
+      fs.closeSync(inputFile);
+
+      url = tempInputPath;
     }
 
     this.isPlaying = true;
@@ -193,7 +240,6 @@ struct Index {
 
     try {
       const decoder = this.decoderTool.createStreamDecoder(url, {
-        ringBytes: 256 * 1024,
         eqEnabled: true,
         eqGainsDb: this.eqGainsDb,
         sampleFormat: 3

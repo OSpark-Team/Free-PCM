@@ -49,7 +49,7 @@ interface Preset {
  *
  * @example
  * ```typescript
- * import { EqPreset, PcmEqualizer } from '@okysu/free-pcm';
+ * import { EqPreset, PcmEqualizer } from '@ospark/free-pcm';
  *
  * const equalizer = new PcmEqualizer();
  *
@@ -101,7 +101,7 @@ export const EqPreset: Preset = {
  *
  * @example
  * ```typescript
- * import { PcmEqualizer, EqPreset } from '@okysu/free-pcm';
+ * import { PcmEqualizer, EqPreset } from '@ospark/free-pcm';
  *
  * // 创建均衡器实例
  * const equalizer = new PcmEqualizer();
@@ -165,7 +165,7 @@ export class PcmEqualizer {
    * equalizer.setGainsDb([6, 5, 4, 2, 0, 0, 0, 0, 0, 0]);
    *
    * // 应用预设（推荐方式）
-   * import { EqPreset } from '@okysu/free-pcm';
+   * import { EqPreset } from '@ospark/free-pcm';
    * equalizer.setGainsDb(EqPreset.Pop);
    * ```
    */
@@ -225,8 +225,8 @@ export class PcmEqualizer {
    *
    * @example
    * ```typescript
-   * import { PcmEqualizer, EqPreset } from '@okysu/free-pcm';
-   * import { PcmDecoderTool } from '@okysu/free-pcm';
+   * import { PcmEqualizer, EqPreset } from '@ospark/free-pcm';
+   * import { PcmDecoderTool } from '@ospark/free-pcm';
    *
    * const equalizer = new PcmEqualizer();
    * equalizer.setGainsDb(EqPreset.Jazz);

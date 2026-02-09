@@ -1,4 +1,4 @@
-# @okysu/free-pcm
+# @ospark/free-pcm
 
 Free PCM 音频解码库 - 支持多种音频格式解码为 PCM，提供流式解码和 10 段均衡器功能
 
@@ -18,7 +18,7 @@ Free PCM 音频解码库 - 支持多种音频格式解码为 PCM，提供流式�
 ```json5
 {
   "dependencies": {
-    "@okysu/free-pcm": "^1.0.0"
+    "@ospark/free-pcm": "^1.0.0"
   }
 }
 ```
@@ -28,7 +28,7 @@ Free PCM 音频解码库 - 支持多种音频格式解码为 PCM，提供流式�
 ### 流式解码并播放
 
 ```typescript
-import freePcm from '@okysu/free-pcm';
+import freePcm from '@ospark/free-pcm';
 
 // 创建解码器
 const decoder = freePcm.createPcmStreamDecoder(
@@ -98,8 +98,8 @@ await audioRenderer.release();
 ### 使用均衡器（推荐方式）
 
 ```typescript
-import freePcm from '@okysu/free-pcm';
-import { PcmEqualizer, EqPreset } from '@okysu/free-pcm';
+import freePcm from '@ospark/free-pcm';
+import { PcmEqualizer, EqPreset } from '@ospark/free-pcm';
 
 // 创建均衡器实例
 const equalizer = new PcmEqualizer();
@@ -128,8 +128,8 @@ decoder.setEqGains(equalizer.getGainsDb());
 ### 使用 AudioRendererPlayer（简化播放控制）
 
 ```typescript
-import freePcm from '@okysu/free-pcm';
-import { AudioRendererPlayer } from '@okysu/free-pcm';
+import freePcm from '@ospark/free-pcm';
+import { AudioRendererPlayer } from '@ospark/free-pcm';
 
 // 创建播放器和解码器
 const player = new AudioRendererPlayer();
@@ -223,8 +223,8 @@ console.log('远程音频时长:', info.durationMs);
 ### 组合使用：均衡器 + 播放器
 
 ```typescript
-import freePcm from '@okysu/free-pcm';
-import { AudioRendererPlayer, PcmEqualizer, EqPreset } from '@okysu/free-pcm';
+import freePcm from '@ospark/free-pcm';
+import { AudioRendererPlayer, PcmEqualizer, EqPreset } from '@ospark/free-pcm';
 
 const player = new AudioRendererPlayer();
 const equalizer = new PcmEqualizer();

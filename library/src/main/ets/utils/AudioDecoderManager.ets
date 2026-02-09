@@ -4,8 +4,7 @@
  */
 
 import { common } from '@kit.AbilityKit';
-import { fileIo as fs } from '@kit.CoreFileKit';
-import { fileUri, picker } from '@kit.CoreFileKit';
+import { fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'liblibrary.so';
@@ -114,7 +113,6 @@ export interface PcmStreamDecoder {
 export class AudioDecoderManager {
   private static instance: AudioDecoderManager;
   private context: common.Context | null = null;
-  private downloadUri: string = '';
 
   private constructor() {}
 
@@ -144,71 +142,6 @@ export class AudioDecoderManager {
   public getContext(): common.Context | null {
     return this.context;
   }
-
-  /**
-   * 初始化并获取用户选择的下载目录 URI
-   * @returns {Promise<boolean>} 是否成功获取目录
-   */
-  public async initDownloadDirectory(): Promise<boolean> {
-    if (!this.context) {
-      hilog.error(DOMAIN, TAG, 'initDownloadDirectory: Context not initialized');
-      return false;
-    }
-
-    try {
-      const documentViewPicker = new picker.DocumentViewPicker(this.context);
-      const documentSaveOptions = new picker.DocumentSaveOptions();
-      documentSaveOptions.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
-
-      const documentSaveResult = await documentViewPicker.save(documentSaveOptions);
-      this.downloadUri = documentSaveResult[0];
-      return true;
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.error(DOMAIN, TAG, 'initDownloadDirectory failed: %{public}s', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * 从 Rawfile 解码音频文件并保存至下载目录
-   * @param {string} rawfileName - rawfile 目录下的文件名
-   * @param {string} outputFileName - 输出的目标文件名 (PCM)
-   * @returns {Promise<boolean>} 解码任务是否成功触发并完成
-   */
-  public async decodeFromRawfile(rawfileName: string, outputFileName: string): Promise<boolean> {
-    if (!this.context || !this.downloadUri) {
-      hilog.error(DOMAIN, TAG, 'decodeFromRawfile: Context or DownloadDir not ready');
-      return false;
-    }
-
-    try {
-      // 读取 Rawfile 
-      const fileData = await this.context.resourceManager.getRawFileContent(rawfileName);
-
-      // 建立临时输入文件
-      const tempInputPath = this.context.filesDir + '/temp_input_' + rawfileName;
-      const inputFile = fs.openSync(tempInputPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY);
-      fs.writeSync(inputFile.fd, fileData.buffer);
-      fs.closeSync(inputFile);
-
-      // 准备输出路径
-      const outputPath = new fileUri.FileUri(this.downloadUri + '/' + outputFileName).path;
-
-      // 调用 NAPI 核心解码
-      const success = testNapi.decodeAudio(tempInputPath, outputPath);
-
-      // 清理临时输入文件
-      fs.unlinkSync(tempInputPath);
-
-      return success;
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.error(DOMAIN, TAG, 'decodeFromRawfile error: %{public}s', error.message);
-      return false;
-    }
-  }
-
   /**
    * 直接同步解码本地文件
    * @param {string} inputPath - 输入文件绝对路径
@@ -231,13 +164,13 @@ export class AudioDecoderManager {
     outputFileName: string,
     onProgress?: (p: DecodeAudioProgress) => void
   ): Promise<boolean> {
-    if (!this.context || !this.downloadUri) {
+    if (!this.context) {
       hilog.error(DOMAIN, TAG, 'decodeFromUrl: Context or DownloadDir not ready');
       return false;
     }
 
     try {
-      const outputPath = new fileUri.FileUri(this.downloadUri + '/' + outputFileName).path;
+      const outputPath = new fileUri.FileUri(outputFileName).path;
       // 调用 NAPI 异步解码
       return await testNapi.decodeAudioAsync(url, outputPath, onProgress);
     } catch (err) {

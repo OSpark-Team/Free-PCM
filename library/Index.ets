@@ -3,11 +3,11 @@
  *
  * 本库提供了音频解码功能，支持多种音频格式（MP3、FLAC、WAV、AAC、OGG、Opus 等）
  *
- * @module @okysu/free-pcm
+ * @module @ospark/free-pcm
  *
  * @example
  * ```typescript
- * import { PcmDecoderTool, AudioRendererPlayer, PcmEqualizer, EqPreset } from '@okysu/free-pcm';
+ * import { PcmDecoderTool, AudioRendererPlayer, PcmEqualizer, EqPreset } from '@ospark/free-pcm';
  *
  * // 创建解码器（推荐使用 PcmDecoderTool.getInstance()）
  * const decoderTool = PcmDecoderTool.getInstance();

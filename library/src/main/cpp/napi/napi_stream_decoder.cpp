@@ -534,12 +534,69 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         ctx->actualChannelCount = cc;
         ctx->actualSampleFormat = sf;
 
+        // Decide ring buffer size:
+        // - ctx->ringBytes > 0: fixed size from options
+        // - ctx->ringBytes == 0: adaptive [64KB..512KB], stair-stepped
+        size_t rb = ctx->ringBytes;
+        if (rb == 0) {
+            constexpr size_t kMin = 64 * 1024;
+            constexpr size_t kMax = 512 * 1024;
+            constexpr size_t kStep = 64 * 1024;
+
+            const bool isHttp = (ctx->inputPathOrUri.rfind("http://", 0) == 0) ||
+                                (ctx->inputPathOrUri.rfind("https://", 0) == 0);
+
+            const int32_t bytesPerSample = (sf == 3) ? 4 : 2;
+            const uint64_t bytesPerSecond = (sr > 0 && cc > 0)
+                                                ? static_cast<uint64_t>(sr) * static_cast<uint64_t>(cc) * static_cast<uint64_t>(bytesPerSample)
+                                                : 0;
+
+            // Target seconds: bigger for network + long content, smaller for short content
+            // so EQ changes take effect faster.
+            double targetSec = 0.0;
+            if (durMs > 0) {
+                if (durMs < 30 * 1000) {
+                    targetSec = 0.25;
+                } else if (durMs < 3 * 60 * 1000) {
+                    targetSec = 0.35;
+                } else if (durMs < 10 * 60 * 1000) {
+                    targetSec = 0.50;
+                } else {
+                    targetSec = 0.75;
+                }
+            } else {
+                targetSec = isHttp ? 1.00 : 0.50;
+            }
+            if (isHttp) {
+                targetSec += 0.25;
+            }
+
+            // High throughput PCM needs more bytes for the same time window.
+            if (bytesPerSecond >= 500000) {
+                targetSec += 0.15;
+            }
+
+            uint64_t desired = 0;
+            if (bytesPerSecond > 0 && targetSec > 0.0) {
+                desired = static_cast<uint64_t>(static_cast<double>(bytesPerSecond) * targetSec);
+            }
+
+            rb = static_cast<size_t>(desired);
+            if (rb < kMin) rb = kMin;
+            if (rb > kMax) rb = kMax;
+            rb = ((rb + kStep - 1) / kStep) * kStep;
+            if (rb < kMin) rb = kMin;
+            if (rb > kMax) rb = kMax;
+
+            ctx->ringBytes = rb;
+        }
+
         // 重新创建 PcmRingBuffer，使用实际的音频参数
         const int32_t bytesPerSample = (sf == 3) ? 4 : 2;  // S32LE=4, S16LE=2
         ctx->ring = std::make_unique<audio::PcmRingBuffer>(
-            ctx->ringBytes,
-            sr,          // sampleRate
-            cc,          // channels
+            rb,
+            sr,            // sampleRate
+            cc,            // channels
             bytesPerSample // bytesPerSample
         );
 
@@ -824,7 +881,10 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     int32_t channelCount = 0;
     int32_t bitrate = 0;
     int32_t sampleFormat = 1;  // Default to S16LE (1), S32LE = 3
-    size_t ringBytes = 512 * 1024; // default
+    // ringBytes:
+    // - 0 means auto (adaptive by audio format + duration + source type)
+    // - otherwise fixed ring buffer size
+    size_t ringBytes = 0;
 
     bool optEqEnabled = false;
     bool hasEqGains = false;
@@ -856,6 +916,8 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
                 int32_t rb = 0;
                 if (napi_get_value_int32(env, v, &rb) == napi_ok && rb > 0) {
                     ringBytes = static_cast<size_t>(rb);
+                } else {
+                    ringBytes = 0;
                 }
             }
 
@@ -937,8 +999,9 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     ctx->actualSampleFormat = sampleFormat;
 
     // 使用默认参数临时创建 PcmRingBuffer，稍后在 infoCb 中重新创建
+    const size_t initialRingBytes = (ringBytes > 0) ? ringBytes : (64 * 1024);
     ctx->ring = std::make_unique<audio::PcmRingBuffer>(
-        ringBytes,
+        initialRingBytes,
         sampleRate > 0 ? sampleRate : 48000,  // 默认采样率
         channelCount > 0 ? channelCount : 2,  // 默认声道数
         2  // 默认每样本字节数（S16LE）

@@ -6,6 +6,6 @@
   "author": "",
   "license": "",
   "dependencies": {
-    "@okysu/free-pcm": "file:../library" // 模块相对路径
+    "@ospark/free-pcm": "file:../library" // 模块相对路径
   }
 }

@@ -36,7 +36,7 @@
 
 ### 模块入口
 - **主导出文件**：`Index.ets`
-- **包名**：`@okysu/free-pcm`
+- **包名**：`@ospark/free-pcm`
 - **版本**：1.0.0
 
 ### 导出的核心类
@@ -47,7 +47,7 @@ export {
   PcmDecoderTool,        // 解码工具
   PcmEqualizer,          // 均衡器
   EqPreset               // 预设常量
-} from '@okysu/free-pcm';
+} from '@ospark/free-pcm';
 ```
 
 ### 使用方式

@@ -103,7 +103,7 @@ struct Index {
 ```json5
 {
   "dependencies": {
-    "@okysu/free-pcm": "file:../library"
+    "@ospark/free-pcm": "file:../library"
   }
 }
 ```

@@ -119,7 +119,7 @@ import {
   AudioRendererPlayer,
   PcmEqualizer,
   EqPreset
-} from '@okysu/free-pcm';
+} from '@ospark/free-pcm';
 
 // 1. 创建解码器
 const decoder = PcmDecoderTool.getInstance().createStreamDecoder('/path/to/audio.mp3');

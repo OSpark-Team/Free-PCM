@@ -405,6 +405,9 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
             OH_AVFormat_GetIntValue(trackFormat, OH_MD_KEY_AUD_SAMPLE_RATE, &detectedSampleRate_);
             OH_AVFormat_GetIntValue(trackFormat, OH_MD_KEY_AUD_CHANNEL_COUNT, &detectedChannelCount_);
+            // For audio/raw (WAV passthrough), this usually tells the PCM sample width.
+            // 1=S16LE, 3=S32LE.
+            OH_AVFormat_GetIntValue(trackFormat, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, &detectedSampleFormat_);
         }
 
         OH_AVFormat_Destroy(trackFormat);
@@ -520,10 +523,24 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             return false;
         }
 
-        // 优先使用检测到的参数，WAV 格式使用传入的 sampleFormat 或默认为 S16LE
+        // 优先使用检测到的参数。
+        // Passthrough 模式不做采样格式转换：必须使用源 PCM 的真实 sampleFormat。
         int32_t finalSR = detectedSampleRate_ > 0 ? detectedSampleRate_ : (sampleRate > 0 ? sampleRate : 44100);
         int32_t finalCh = detectedChannelCount_ > 0 ? detectedChannelCount_ : (channelCount > 0 ? channelCount : 2);
-        int32_t finalSF = (sampleFormat == 3) ? 3 : 1; // 使用传入的 sampleFormat: 3=S32LE, 默认 1=S16LE
+        int32_t finalSF = 1;
+        if (detectedSampleFormat_ == 3) {
+            finalSF = 3;
+        } else if (detectedSampleFormat_ == 1) {
+            finalSF = 1;
+        } else {
+            // Fall back to S16LE for safety (most WAV are S16LE).
+            finalSF = 1;
+            OH_LOG_INFO(LOG_APP, "Passthrough audio/raw sampleFormat unknown, defaulting to S16LE");
+        }
+
+        if (sampleFormat == 3 && finalSF != 3) {
+            OH_LOG_INFO(LOG_APP, "Passthrough audio/raw ignores requested sampleFormat=3; using source format=%{public}d", finalSF);
+        }
         
         if (infoCb) {
             infoCb(finalSR, finalCh, finalSF, durationMs_);

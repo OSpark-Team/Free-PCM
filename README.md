@@ -27,7 +27,7 @@ Free—PCM /
 - 独立的 HarmonyOS Ability 应用
 - 可以在真机或模拟器上运行
 - 提供 UI 界面进行交互测试
-- 引用 `@okysu/free-pcm` 模块作为依赖
+- 引用 `@ospark/free-pcm` 模块作为依赖
 
 ### 🔧 library/ - 音频解码库
 
@@ -56,7 +56,7 @@ import {
   PcmEqualizer,          // 均衡器类
   EqPreset,              // 预设常量
   AudioDecoderManager    // 解码管理器
-} from '@okysu/free-pcm';
+} from '@ospark/free-pcm';
 ```
 
 ## 快速开始
@@ -78,7 +78,7 @@ hvigorw library:assembleHar
 ### 3. 使用库
 
 ```typescript
-import { PcmDecoderTool, AudioRendererPlayer, PcmEqualizer, EqPreset } from '@okysu/free-pcm';
+import { PcmDecoderTool, AudioRendererPlayer, PcmEqualizer, EqPreset } from '@ospark/free-pcm';
 
 // 创建解码器
 const decoderTool = PcmDecoderTool.getInstance();

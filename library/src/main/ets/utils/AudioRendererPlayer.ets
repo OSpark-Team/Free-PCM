@@ -13,8 +13,8 @@
  *
  * @example
  * ```typescript
- * import { AudioRendererPlayer } from '@okysu/free-pcm';
- * import freePcm from '@okysu/free-pcm';
+ * import { AudioRendererPlayer } from '@ospark/free-pcm';
+ * import freePcm from '@ospark/free-pcm';
  *
  * const player = new AudioRendererPlayer();
  * const decoder = freePcm.createPcmStreamDecoder('/path/to/audio.mp3');
@@ -575,5 +575,32 @@ export class AudioRendererPlayer {
       this.renderer = null;
       this.streamInfo = null;
     }
+  }
+
+  /**
+   * 获取AudioRenderer实例
+   *
+   * @returns <audio.AudioRenderer> AudioRenderer实例
+   */
+  public getRenderer(): audio.AudioRenderer | null {
+    return this.renderer;
+  }
+
+  /**
+   * 获取解码器实例
+   *
+   * @returns <PcmStreamDecoder> 解码器实例
+   */
+  public getDecoder(): PcmStreamDecoder | null {
+    return this.decoder;
+  }
+
+  /**
+   * 获取PCM流信息
+   *
+   * @returns <PcmStreamInfo> PCM流信息
+   */
+  public getStreamInfo(): PcmStreamInfo | null {
+    return this.streamInfo;
   }
 }
