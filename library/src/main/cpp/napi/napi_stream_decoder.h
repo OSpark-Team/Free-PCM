@@ -70,6 +70,22 @@ napi_value PcmDecoderSetEqEnabled(napi_env env, napi_callback_info info);
  */
 napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info);
 
+/**
+ * @brief 设置左右声道独立均衡器增益
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return undefined
+ */
+napi_value PcmDecoderSetEqGainsLR(napi_env env, napi_callback_info info);
+
+/**
+ * @brief 设置左右声道独立音量系数（听感补偿）
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return undefined
+ */
+napi_value PcmDecoderSetChannelVolumes(napi_env env, napi_callback_info info);
+
 // ============================================================================
 // Seek 功能接口
 // ============================================================================

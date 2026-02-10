@@ -279,6 +279,18 @@ export type PcmStreamDecoder = {
   setEqGains: (gainsDb: number[]) => void;
 
   /**
+   * 设置左右声道独立均衡器增益（仅对双声道生效）
+   */
+  setEqGainsLR?: (leftGainsDb: number[], rightGainsDb: number[]) => void;
+
+  /**
+   * 设置左右声道独立音量系数（听感补偿）
+   * - 0.0~2.0，1.0=不变
+   * - 仅对双声道生效；单声道使用 leftCoeff
+   */
+  setChannelVolumes?: (leftCoeff: number, rightCoeff: number) => void;
+
+  /**
    * 跳转到指定播放位置（毫秒）
    */
   seekTo: (positionMs: number) => void;

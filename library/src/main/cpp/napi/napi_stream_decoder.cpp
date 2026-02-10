@@ -344,10 +344,108 @@ napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info) {
         }
 
         const int32_t gain100 = static_cast<int32_t>(std::lround(gainDb * 100.0));
-        ctx->eqGainsDb100[i].store(gain100);
+        ctx->eqGainsDb100Stereo[0][i].store(gain100);
+        ctx->eqGainsDb100Stereo[1][i].store(gain100);
     }
 
     ctx->eqVersion.fetch_add(1);
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderSetEqGainsLR(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 2) {
+        napi_throw_error(env, nullptr, "setEqGainsLR(left, right) requires 2 arguments");
+        return nullptr;
+    }
+
+    auto parseOne = [&](napi_value arr, size_t chIndex) -> bool {
+        bool isArray = false;
+        napi_is_array(env, arr, &isArray);
+        if (!isArray) {
+            return false;
+        }
+        uint32_t len = 0;
+        napi_get_array_length(env, arr, &len);
+        if (len != static_cast<uint32_t>(PcmEqualizer::kBandCount)) {
+            return false;
+        }
+        for (uint32_t i = 0; i < len; i++) {
+            napi_value v;
+            napi_get_element(env, arr, i, &v);
+            double gainDb = 0.0;
+            if (napi_get_value_double(env, v, &gainDb) != napi_ok) {
+                int32_t gi = 0;
+                if (napi_get_value_int32(env, v, &gi) != napi_ok) {
+                    return false;
+                }
+                gainDb = static_cast<double>(gi);
+            }
+            if (gainDb > 24.0) {
+                gainDb = 24.0;
+            } else if (gainDb < -24.0) {
+                gainDb = -24.0;
+            }
+            const int32_t gain100 = static_cast<int32_t>(std::lround(gainDb * 100.0));
+            ctx->eqGainsDb100Stereo[chIndex][i].store(gain100);
+        }
+        return true;
+    };
+
+    if (!parseOne(args[0], 0) || !parseOne(args[1], 1)) {
+        napi_throw_error(env, nullptr, "setEqGainsLR expects two arrays of 10 numbers");
+        return nullptr;
+    }
+
+    ctx->eqVersion.fetch_add(1);
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderSetChannelVolumes(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 2) {
+        napi_throw_error(env, nullptr, "setChannelVolumes(left, right) requires 2 arguments");
+        return nullptr;
+    }
+
+    auto parseCoeff = [&](napi_value v, int32_t &out1000) -> bool {
+        double d = 0.0;
+        if (napi_get_value_double(env, v, &d) != napi_ok) {
+            int32_t i = 0;
+            if (napi_get_value_int32(env, v, &i) != napi_ok) {
+                return false;
+            }
+            d = static_cast<double>(i);
+        }
+        if (d < 0.0) d = 0.0;
+        if (d > 2.0) d = 2.0;
+        out1000 = static_cast<int32_t>(std::lround(d * 1000.0));
+        return true;
+    };
+
+    int32_t l1000 = 1000;
+    int32_t r1000 = 1000;
+    if (!parseCoeff(args[0], l1000) || !parseCoeff(args[1], r1000)) {
+        napi_throw_error(env, nullptr, "setChannelVolumes expects two numbers");
+        return nullptr;
+    }
+
+    ctx->channelVol1000[0].store(l1000);
+    ctx->channelVol1000[1].store(r1000);
 
     napi_value undef;
     napi_get_undefined(env, &undef);
@@ -666,43 +764,139 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         }
 
         const bool eqEnabled = ctx->eqEnabled.load();
-        if (!eqEnabled || !ctx->eq.IsReady() || size < 2) {
+        const bool needEq = eqEnabled && ctx->eq.IsReady();
+
+        // Per-channel volume compensation.
+        const int32_t volL1000 = ctx->channelVol1000[0].load();
+        const int32_t volR1000 = ctx->channelVol1000[1].load();
+
+        const int32_t ch = ctx->actualChannelCount;
+        const int32_t sf = ctx->actualSampleFormat;
+        const int32_t bytesPerSample = (sf == 3) ? 4 : 2;
+        if (bytesPerSample != 2 && bytesPerSample != 4) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
-        const uint32_t v = ctx->eqVersion.load();
-        if (v != ctx->eqAppliedVersion) {
-            std::array<float, PcmEqualizer::kBandCount> gains;
-            for (size_t i = 0; i < PcmEqualizer::kBandCount; i++) {
-                gains[i] = static_cast<float>(ctx->eqGainsDb100[i].load()) / 100.0f;
-            }
-            ctx->eq.SetGainsDb(gains);
-            ctx->eqAppliedVersion = v;
-        }
-        ctx->eq.SetEnabled(true);
+        const bool needChanVol = (ch == 1 && volL1000 != 1000) ||
+                                 (ch == 2 && (volL1000 != 1000 || volR1000 != 1000));
 
-        const size_t sampleCount = size / 2;
-        const int32_t ch = ctx->eqChannelCount;
+        if (!needEq && !needChanVol) {
+            return ctx->ring->Push(pcm, size, &ctx->cancel);
+        }
+
         if (ch != 1 && ch != 2) {
+            // Only stereo/mono are supported for per-ear compensation.
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
+
+        const size_t sampleCount = size / static_cast<size_t>(bytesPerSample);
         const size_t frameCount = sampleCount / static_cast<size_t>(ch);
-        const size_t bytesToProcess = frameCount * static_cast<size_t>(ch) * 2;
+        const size_t bytesToProcess = frameCount * static_cast<size_t>(ch) * static_cast<size_t>(bytesPerSample);
         if (bytesToProcess == 0) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
-        ctx->eqScratch.resize(sampleCount);
-        memcpy(ctx->eqScratch.data(), pcm, bytesToProcess);
+        if (needEq) {
+            const uint32_t v = ctx->eqVersion.load();
+            if (v != ctx->eqAppliedVersion) {
+                std::array<float, PcmEqualizer::kBandCount> gl;
+                std::array<float, PcmEqualizer::kBandCount> gr;
+                for (size_t i = 0; i < PcmEqualizer::kBandCount; i++) {
+                    gl[i] = static_cast<float>(ctx->eqGainsDb100Stereo[0][i].load()) / 100.0f;
+                    gr[i] = static_cast<float>(ctx->eqGainsDb100Stereo[1][i].load()) / 100.0f;
+                }
+                ctx->eq.SetGainsDbStereo(gl, gr);
+                ctx->eqAppliedVersion = v;
+            }
+            ctx->eq.SetEnabled(true);
+        } else {
+            ctx->eq.SetEnabled(false);
+        }
+
+        if (bytesPerSample == 2) {
+            ctx->eqScratch16.resize(sampleCount);
+            memcpy(ctx->eqScratch16.data(), pcm, bytesToProcess);
+            if (bytesToProcess < size) {
+                memcpy(reinterpret_cast<uint8_t *>(ctx->eqScratch16.data()) + bytesToProcess, pcm + bytesToProcess,
+                       size - bytesToProcess);
+            }
+
+            if (needEq) {
+                ctx->eq.Process(ctx->eqScratch16.data(), frameCount);
+            }
+
+            if (needChanVol) {
+                if (ch == 1) {
+                    for (size_t i = 0; i < frameCount; i++) {
+                        const int32_t s = static_cast<int32_t>(ctx->eqScratch16[i]);
+                        int32_t out = static_cast<int32_t>((static_cast<int64_t>(s) * volL1000) / 1000);
+                        if (out > 32767) out = 32767;
+                        if (out < -32768) out = -32768;
+                        ctx->eqScratch16[i] = static_cast<int16_t>(out);
+                    }
+                } else {
+                    for (size_t i = 0; i < frameCount; i++) {
+                        const int32_t sl = static_cast<int32_t>(ctx->eqScratch16[i * 2]);
+                        const int32_t sr = static_cast<int32_t>(ctx->eqScratch16[i * 2 + 1]);
+
+                        int32_t outL = static_cast<int32_t>((static_cast<int64_t>(sl) * volL1000) / 1000);
+                        int32_t outR = static_cast<int32_t>((static_cast<int64_t>(sr) * volR1000) / 1000);
+
+                        if (outL > 32767) outL = 32767;
+                        if (outL < -32768) outL = -32768;
+                        if (outR > 32767) outR = 32767;
+                        if (outR < -32768) outR = -32768;
+
+                        ctx->eqScratch16[i * 2] = static_cast<int16_t>(outL);
+                        ctx->eqScratch16[i * 2 + 1] = static_cast<int16_t>(outR);
+                    }
+                }
+            }
+
+            return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch16.data()), size, &ctx->cancel);
+        }
+
+        // S32LE
+        ctx->eqScratch32.resize(sampleCount);
+        memcpy(ctx->eqScratch32.data(), pcm, bytesToProcess);
         if (bytesToProcess < size) {
-            // keep the tail bytes (should be rare)
-            memcpy(reinterpret_cast<uint8_t *>(ctx->eqScratch.data()) + bytesToProcess, pcm + bytesToProcess,
+            memcpy(reinterpret_cast<uint8_t *>(ctx->eqScratch32.data()) + bytesToProcess, pcm + bytesToProcess,
                    size - bytesToProcess);
         }
 
-        ctx->eq.Process(ctx->eqScratch.data(), frameCount);
+        if (needEq) {
+            ctx->eq.Process(ctx->eqScratch32.data(), frameCount);
+        }
 
-        return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch.data()), size, &ctx->cancel);
+        if (needChanVol) {
+            if (ch == 1) {
+                for (size_t i = 0; i < frameCount; i++) {
+                    const int64_t s = static_cast<int64_t>(ctx->eqScratch32[i]);
+                    int64_t out = (s * static_cast<int64_t>(volL1000)) / 1000;
+                    if (out > 2147483647LL) out = 2147483647LL;
+                    if (out < -2147483648LL) out = -2147483648LL;
+                    ctx->eqScratch32[i] = static_cast<int32_t>(out);
+                }
+            } else {
+                for (size_t i = 0; i < frameCount; i++) {
+                    const int64_t sl = static_cast<int64_t>(ctx->eqScratch32[i * 2]);
+                    const int64_t sr = static_cast<int64_t>(ctx->eqScratch32[i * 2 + 1]);
+
+                    int64_t outL = (sl * static_cast<int64_t>(volL1000)) / 1000;
+                    int64_t outR = (sr * static_cast<int64_t>(volR1000)) / 1000;
+
+                    if (outL > 2147483647LL) outL = 2147483647LL;
+                    if (outL < -2147483648LL) outL = -2147483648LL;
+                    if (outR > 2147483647LL) outR = 2147483647LL;
+                    if (outR < -2147483648LL) outR = -2147483648LL;
+
+                    ctx->eqScratch32[i * 2] = static_cast<int32_t>(outL);
+                    ctx->eqScratch32[i * 2 + 1] = static_cast<int32_t>(outR);
+                }
+            }
+        }
+
+        return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch32.data()), size, &ctx->cancel);
     };
 
     AudioDecoder::ErrorCallback errorCb = [ctx](const std::string &stage, int32_t code, const std::string &message) {
@@ -998,8 +1192,12 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     ctx->eqEnabled.store(optEqEnabled);
     ctx->eqVersion.store(1);
     for (size_t i = 0; i < PcmEqualizer::kBandCount; i++) {
-        ctx->eqGainsDb100[i].store(hasEqGains ? optEqGainsDb100[i] : 0);
+        const int32_t g100 = hasEqGains ? optEqGainsDb100[i] : 0;
+        ctx->eqGainsDb100Stereo[0][i].store(g100);
+        ctx->eqGainsDb100Stereo[1][i].store(g100);
     }
+    ctx->channelVol1000[0].store(1000);
+    ctx->channelVol1000[1].store(1000);
     ctx->eqAppliedVersion = 0;
     ctx->eqSampleRate = 0;
     ctx->eqChannelCount = 0;
@@ -1085,6 +1283,15 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     napi_value setEqGainsFn;
     napi_create_function(env, "setEqGains", NAPI_AUTO_LENGTH, PcmDecoderSetEqGains, ctx, &setEqGainsFn);
     napi_set_named_property(env, decoderObj, "setEqGains", setEqGainsFn);
+
+    napi_value setEqGainsLRFn;
+    napi_create_function(env, "setEqGainsLR", NAPI_AUTO_LENGTH, PcmDecoderSetEqGainsLR, ctx, &setEqGainsLRFn);
+    napi_set_named_property(env, decoderObj, "setEqGainsLR", setEqGainsLRFn);
+
+    napi_value setChannelVolumesFn;
+    napi_create_function(env, "setChannelVolumes", NAPI_AUTO_LENGTH, PcmDecoderSetChannelVolumes, ctx,
+                         &setChannelVolumesFn);
+    napi_set_named_property(env, decoderObj, "setChannelVolumes", setChannelVolumesFn);
 
     // Seek 功能方法
     napi_value seekToFn;

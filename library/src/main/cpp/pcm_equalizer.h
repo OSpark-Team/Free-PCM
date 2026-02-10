@@ -17,6 +17,15 @@ public:
     void Reset();
     void Init(int32_t sampleRate, int32_t channelCount);
     void SetGainsDb(const std::array<float, kBandCount>& gainsDb);
+
+    // Set independent gains for L/R channels (stereo only).
+    // For mono, left gains are used.
+    void SetGainsDbStereo(const std::array<float, kBandCount>& gainsLeftDb,
+                          const std::array<float, kBandCount>& gainsRightDb);
+
+    // Set gains for a specific channel.
+    // channelIndex: 0=left/mono, 1=right.
+    void SetGainsDbForChannel(int32_t channelIndex, const std::array<float, kBandCount>& gainsDb);
     void SetEnabled(bool enabled);
 
     bool IsReady() const;
@@ -59,9 +68,13 @@ private:
     bool enabled_;
     int32_t sampleRate_;
     int32_t channelCount_;
-    std::array<float, kBandCount> gainsDb_;
+
+    // gainsDbStereo_[0]=left/mono, gainsDbStereo_[1]=right.
+    std::array<std::array<float, kBandCount>, 2> gainsDbStereo_;
     std::array<float, kBandCount> freqsHz_;
-    std::array<Biquad, kBandCount> biquads_;
+
+    // biquadsByCh_[channel][band]
+    std::array<std::array<Biquad, kBandCount>, 2> biquadsByCh_;
 
     // state_[band][channel]
     std::array<std::array<State, 2>, kBandCount> stateStereo_;

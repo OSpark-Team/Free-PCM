@@ -126,7 +126,13 @@ struct PcmStreamDecoderContext {
     // EQ（10 段均衡器）配置，与 JS 线程共享
     std::atomic<bool> eqEnabled;
     std::atomic<uint32_t> eqVersion;
-    std::array<std::atomic<int32_t>, PcmEqualizer::kBandCount> eqGainsDb100;
+
+    // EQ gains per channel (0=left/mono, 1=right). Unit: dB * 100.
+    std::array<std::array<std::atomic<int32_t>, PcmEqualizer::kBandCount>, 2> eqGainsDb100Stereo;
+
+    // Per-channel volume compensation coefficients.
+    // Unit: coefficient * 1000. 1000 = 1.0, 500 = 0.5, 1500 = 1.5.
+    std::array<std::atomic<int32_t>, 2> channelVol1000;
 
     // 工作线程状态
     uint32_t eqAppliedVersion;
@@ -134,7 +140,8 @@ struct PcmStreamDecoderContext {
     int32_t eqChannelCount;
     PcmEqualizer eq;
 
-    std::vector<int16_t> eqScratch;
+    std::vector<int16_t> eqScratch16;
+    std::vector<int32_t> eqScratch32;
 
     // 用于 PcmRingBuffer 重新初始化
     size_t ringBytes;

@@ -603,4 +603,40 @@ export class AudioRendererPlayer {
   public getStreamInfo(): PcmStreamInfo | null {
     return this.streamInfo;
   }
+
+  /**
+   * 设置左右声道独立均衡器增益（仅对双声道生效）
+   *
+   * @param leftGainsDb - 左声道 10 段增益（dB）
+   * @param rightGainsDb - 右声道 10 段增益（dB）
+   */
+  public setEqGainsLR(leftGainsDb: number[], rightGainsDb: number[]): void {
+    if (!this.decoder) {
+      throw new Error('Decoder not initialized');
+    }
+
+    if (this.decoder.setEqGainsLR) {
+      this.decoder.setEqGainsLR(leftGainsDb, rightGainsDb);
+      return;
+    }
+
+    // Fallback: apply left gains to all channels.
+    this.decoder.setEqGains(leftGainsDb);
+  }
+
+  /**
+   * 设置左右声道独立音量系数（听感补偿）
+   *
+   * @param leftCoeff - 左声道系数（0.0~2.0，1.0=不变）
+   * @param rightCoeff - 右声道系数（0.0~2.0，1.0=不变）
+   */
+  public setChannelVolumes(leftCoeff: number, rightCoeff: number): void {
+    if (!this.decoder) {
+      throw new Error('Decoder not initialized');
+    }
+    if (!this.decoder.setChannelVolumes) {
+      throw new Error('setChannelVolumes is not supported by this decoder');
+    }
+    this.decoder.setChannelVolumes(leftCoeff, rightCoeff);
+  }
 }

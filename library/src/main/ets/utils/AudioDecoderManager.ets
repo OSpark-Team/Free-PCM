@@ -87,6 +87,20 @@ export interface PcmStreamDecoder {
   setEqEnabled: (enabled: boolean) => void;
   /** 设置均衡器增益 */
   setEqGains: (gainsDb: number[]) => void;
+
+  /**
+   * 设置左右声道独立均衡器增益（仅对双声道生效）
+   * @param leftGainsDb 左声道 10 段增益（dB）
+   * @param rightGainsDb 右声道 10 段增益（dB）
+   */
+  setEqGainsLR?: (leftGainsDb: number[], rightGainsDb: number[]) => void;
+
+  /**
+   * 设置左右声道独立音量系数（听感补偿）
+   * @param leftCoeff 左声道系数（0.0~2.0，1.0=不变）
+   * @param rightCoeff 右声道系数（0.0~2.0，1.0=不变）
+   */
+  setChannelVolumes?: (leftCoeff: number, rightCoeff: number) => void;
   /**
    * 跳转到指定播放位置
    * @param positionMs 目标位置（毫秒）
