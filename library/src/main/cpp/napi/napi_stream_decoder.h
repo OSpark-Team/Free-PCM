@@ -86,6 +86,23 @@ napi_value PcmDecoderSetEqGainsLR(napi_env env, napi_callback_info info);
  */
 napi_value PcmDecoderSetChannelVolumes(napi_env env, napi_callback_info info);
 
+/**
+ * @brief 设置 DRC 启用状态
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return undefined
+ */
+napi_value PcmDecoderSetDrcEnabled(napi_env env, napi_callback_info info);
+
+/**
+ * @brief 设置 DRC 参数
+ * @remarks 参数顺序：thresholdDb, ratio, attackMs, releaseMs, makeupGainDb
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return undefined
+ */
+napi_value PcmDecoderSetDrcParams(napi_env env, napi_callback_info info);
+
 // ============================================================================
 // Seek 功能接口
 // ============================================================================

@@ -54,12 +54,31 @@ export interface PcmStreamDecoderOptions {
   eqGainsDb?: number[];
 }
 
+/** DRC 仪表数据 */
+export interface DrcMeterInfo {
+  /** 输入峰值电平（dBFS，<=0） */
+  levelDb: number;
+  /** 当前总增益（dB，包含 makeup） */
+  gainDb: number;
+  /** 压缩量（dB，>=0，不含 makeup） */
+  grDb: number;
+}
+
+
 /** 解码器回调函数集合 */
 export interface PcmStreamDecoderCallbacks {
   /** 进度回调 */
   onProgress?: (p: DecodeAudioProgress) => void;
   /** 错误回调 */
   onError?: (e: Error) => void;
+
+  /**
+   * DRC 仪表回调（节流，约 10Hz）
+   * - levelDb: 输入峰值电平（dBFS，<=0）
+   * - gainDb: 当前总增益（dB，包含 makeup）
+   * - grDb: 压缩量（dB，>=0，不含 makeup）
+   */
+  onDrcMeter?: (m: DrcMeterInfo) => void;
 }
 
 /** 流式 PCM 解码器接口 */
@@ -101,6 +120,19 @@ export interface PcmStreamDecoder {
    * @param rightCoeff 右声道系数（0.0~2.0，1.0=不变）
    */
   setChannelVolumes?: (leftCoeff: number, rightCoeff: number) => void;
+
+  /** 启用/禁用动态范围压缩（DRC） */
+  setDrcEnabled?: (enabled: boolean) => void;
+
+  /**
+   * 设置 DRC 参数
+   * @param thresholdDb 阈值（dB，-60~0）
+   * @param ratio 压缩比（1~20）
+   * @param attackMs 启动时间（ms）
+   * @param releaseMs 释放时间（ms）
+   * @param makeupGainDb 补偿增益（dB，-12~24）
+   */
+  setDrcParams?: (thresholdDb: number, ratio: number, attackMs: number, releaseMs: number, makeupGainDb: number) => void;
   /**
    * 跳转到指定播放位置
    * @param positionMs 目标位置（毫秒）

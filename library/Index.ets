@@ -36,5 +36,6 @@ export type {
   PcmStreamInfo,
   PcmStreamDecoderOptions,
   PcmStreamDecoderCallbacks,
-  PcmStreamDecoder
+  PcmStreamDecoder,
+  DrcMeterInfo
 } from './src/main/ets/utils/AudioDecoderManager';

@@ -144,6 +144,11 @@ export type PcmStreamDecoderCallbacks = {
    * ```
    */
   onError?: (e: Error & { stage?: string; code?: number }) => void;
+
+  /**
+   * DRC meter callback (throttled).
+   */
+  onDrcMeter?: (m: { levelDb: number; gainDb: number; grDb: number }) => void;
 };
 
 /**
@@ -289,6 +294,17 @@ export type PcmStreamDecoder = {
    * - 仅对双声道生效；单声道使用 leftCoeff
    */
   setChannelVolumes?: (leftCoeff: number, rightCoeff: number) => void;
+
+  /**
+   * 启用/禁用动态范围压缩（DRC）
+   */
+  setDrcEnabled?: (enabled: boolean) => void;
+
+  /**
+   * 设置 DRC 参数
+   * @remarks 参数顺序：thresholdDb, ratio, attackMs, releaseMs, makeupGainDb
+   */
+  setDrcParams?: (thresholdDb: number, ratio: number, attackMs: number, releaseMs: number, makeupGainDb: number) => void;
 
   /**
    * 跳转到指定播放位置（毫秒）

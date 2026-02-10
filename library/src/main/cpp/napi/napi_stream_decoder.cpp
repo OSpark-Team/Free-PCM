@@ -3,6 +3,8 @@
 #undef LOG_TAG
 #define LOG_TAG "NapiStreamDecoder"
 
+#include <chrono>
+
 namespace napi_stream_decoder {
 
 // ============================================================================
@@ -134,9 +136,45 @@ void CallJsDecoderEvent(napi_env env, napi_value /*jsCb*/, void *context, void *
         ctx->seekDeferred = nullptr;
         break;
     }
+    case DecoderEventType::DrcMeter: {
+        if (ctx->onDrcMeterRef == nullptr) {
+            break;
+        }
+        napi_value cb;
+        napi_get_reference_value(env, ctx->onDrcMeterRef, &cb);
+        if (cb == nullptr) {
+            break;
+        }
+
+        napi_value arg;
+        napi_create_object(env, &arg);
+
+        napi_value level;
+        napi_create_double(env, payload->drcLevelDb, &level);
+        napi_set_named_property(env, arg, "levelDb", level);
+
+        napi_value gain;
+        napi_create_double(env, payload->drcGainDb, &gain);
+        napi_set_named_property(env, arg, "gainDb", gain);
+
+        napi_value gr;
+        napi_create_double(env, payload->drcGrDb, &gr);
+        napi_set_named_property(env, arg, "grDb", gr);
+
+        napi_value argv[1] = {arg};
+        napi_value result;
+        napi_call_function(env, nullptr, cb, 1, argv, &result);
+        break;
+    }
     default:
         break;
     }
+}
+
+static uint64_t NowMs()
+{
+    using namespace std::chrono;
+    return static_cast<uint64_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
 static void QueueSeekEvent(PcmStreamDecoderContext *ctx, uint64_t seq, bool success, int32_t code,
@@ -152,6 +190,20 @@ static void QueueSeekEvent(PcmStreamDecoderContext *ctx, uint64_t seq, bool succ
     payload->seekSuccess = success;
     payload->code = code;
     payload->message = message;
+
+    (void)napi_call_threadsafe_function(ctx->eventTsfn, payload, napi_tsfn_nonblocking);
+}
+
+static void QueueDrcMeterEvent(PcmStreamDecoderContext *ctx, double levelDb, double gainDb, double grDb) {
+    if (!ctx || ctx->eventTsfn == nullptr) {
+        return;
+    }
+
+    auto *payload = new DecoderEventPayload();
+    payload->type = DecoderEventType::DrcMeter;
+    payload->drcLevelDb = levelDb;
+    payload->drcGainDb = gainDb;
+    payload->drcGrDb = grDb;
 
     (void)napi_call_threadsafe_function(ctx->eventTsfn, payload, napi_tsfn_nonblocking);
 }
@@ -355,6 +407,91 @@ napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info) {
     return undef;
 }
 
+// ============================================================================
+// DRC (Dynamic Range Compression)
+// ============================================================================
+
+napi_value PcmDecoderSetDrcEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "setDrcEnabled(enabled) requires 1 argument");
+        return nullptr;
+    }
+
+    bool enabled = false;
+    napi_get_value_bool(env, args[0], &enabled);
+    ctx->drcEnabled.store(enabled);
+    ctx->drcVersion.fetch_add(1);
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderSetDrcParams(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value args[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 5) {
+        napi_throw_error(env, nullptr, "setDrcParams(thresholdDb, ratio, attackMs, releaseMs, makeupGainDb) requires 5 arguments");
+        return nullptr;
+    }
+
+    auto getNum = [&](napi_value v, double &out) -> bool {
+        if (napi_get_value_double(env, v, &out) == napi_ok) {
+            return true;
+        }
+        int32_t i = 0;
+        if (napi_get_value_int32(env, v, &i) == napi_ok) {
+            out = static_cast<double>(i);
+            return true;
+        }
+        return false;
+    };
+
+    double thresholdDb = -20.0;
+    double ratio = 4.0;
+    double attackMs = 10.0;
+    double releaseMs = 100.0;
+    double makeupDb = 0.0;
+
+    if (!getNum(args[0], thresholdDb) || !getNum(args[1], ratio) || !getNum(args[2], attackMs) ||
+        !getNum(args[3], releaseMs) || !getNum(args[4], makeupDb)) {
+        napi_throw_error(env, nullptr, "setDrcParams expects numbers");
+        return nullptr;
+    }
+
+    // Clamp ranges (match DrcProcessor clamps)
+    if (thresholdDb < -60.0) thresholdDb = -60.0;
+    if (thresholdDb > 0.0) thresholdDb = 0.0;
+    if (ratio < 1.0) ratio = 1.0;
+    if (ratio > 20.0) ratio = 20.0;
+    if (attackMs < 0.1) attackMs = 0.1;
+    if (attackMs > 200.0) attackMs = 200.0;
+    if (releaseMs < 5.0) releaseMs = 5.0;
+    if (releaseMs > 2000.0) releaseMs = 2000.0;
+    if (makeupDb < -12.0) makeupDb = -12.0;
+    if (makeupDb > 24.0) makeupDb = 24.0;
+
+    ctx->drcThresholdDb100.store(static_cast<int32_t>(std::lround(thresholdDb * 100.0)));
+    ctx->drcRatio1000.store(static_cast<int32_t>(std::lround(ratio * 1000.0)));
+    ctx->drcAttackMs100.store(static_cast<int32_t>(std::lround(attackMs * 100.0)));
+    ctx->drcReleaseMs100.store(static_cast<int32_t>(std::lround(releaseMs * 100.0)));
+    ctx->drcMakeupDb100.store(static_cast<int32_t>(std::lround(makeupDb * 100.0)));
+
+    ctx->drcVersion.fetch_add(1);
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
 napi_value PcmDecoderSetEqGainsLR(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
@@ -491,7 +628,7 @@ napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info) {
         return nullptr;
     }
 
-    OH_LOG_INFO(LOG_APP, "PcmDecoderSeekTo called: positionMs=%{public}lld", positionMs);
+    OH_LOG_INFO(LOG_APP, "PcmDecoderSeekTo called: positionMs=%{public}lld", (long long)positionMs);
 
     // Request a seek to be applied by the decode thread.
     // We clear the ring immediately to stop feeding old PCM after renderer.flush().
@@ -607,6 +744,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
     ctx->success = false;
 
+    // ensure meter starts fresh
+    ctx->drcMeterLastEmitMs = 0;
+
     AudioDecoder decoder;
 
     AudioDecoder::InfoCallback infoCb = [ctx](int32_t sr, int32_t cc, int32_t sf, int64_t durMs) {
@@ -615,6 +755,10 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         ctx->eqAppliedVersion = 0;
         ctx->eq.Init(sr, cc);
         ctx->eq.SetEnabled(ctx->eqEnabled.load());
+
+        ctx->drcAppliedVersion = 0;
+        ctx->drc.Init(sr, cc);
+        ctx->drc.SetEnabled(ctx->drcEnabled.load());
 
         // 保存实际音频参数
         ctx->actualSampleRate = sr;
@@ -766,6 +910,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         const bool eqEnabled = ctx->eqEnabled.load();
         const bool needEq = eqEnabled && ctx->eq.IsReady();
 
+        const bool drcEnabled = ctx->drcEnabled.load();
+        const bool needDrc = drcEnabled && ctx->drc.IsReady();
+
         // Per-channel volume compensation.
         const int32_t volL1000 = ctx->channelVol1000[0].load();
         const int32_t volR1000 = ctx->channelVol1000[1].load();
@@ -780,7 +927,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         const bool needChanVol = (ch == 1 && volL1000 != 1000) ||
                                  (ch == 2 && (volL1000 != 1000 || volR1000 != 1000));
 
-        if (!needEq && !needChanVol) {
+        if (!needEq && !needChanVol && !needDrc) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
@@ -811,6 +958,23 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             ctx->eq.SetEnabled(true);
         } else {
             ctx->eq.SetEnabled(false);
+        }
+
+        // Apply DRC params (lazy) if enabled.
+        if (needDrc) {
+            const uint32_t dv = ctx->drcVersion.load();
+            if (dv != ctx->drcAppliedVersion) {
+                const float thr = static_cast<float>(ctx->drcThresholdDb100.load()) / 100.0f;
+                const float ratio = static_cast<float>(ctx->drcRatio1000.load()) / 1000.0f;
+                const float atk = static_cast<float>(ctx->drcAttackMs100.load()) / 100.0f;
+                const float rel = static_cast<float>(ctx->drcReleaseMs100.load()) / 100.0f;
+                const float makeup = static_cast<float>(ctx->drcMakeupDb100.load()) / 100.0f;
+                ctx->drc.SetParams(thr, ratio, atk, rel, makeup);
+                ctx->drcAppliedVersion = dv;
+            }
+            ctx->drc.SetEnabled(true);
+        } else {
+            ctx->drc.SetEnabled(false);
         }
 
         if (bytesPerSample == 2) {
@@ -853,6 +1017,19 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
                 }
             }
 
+            if (needDrc) {
+                ctx->drc.Process(ctx->eqScratch16.data(), frameCount);
+
+            const uint64_t now = NowMs();
+            if ((now - ctx->drcMeterLastEmitMs) >= 100) {
+                ctx->drcMeterLastEmitMs = now;
+                QueueDrcMeterEvent(ctx,
+                                  static_cast<double>(ctx->drc.GetLastLevelDb()),
+                                  static_cast<double>(ctx->drc.GetLastGainDb()),
+                                  static_cast<double>(ctx->drc.GetLastGrDb()));
+            }
+            }
+
             return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch16.data()), size, &ctx->cancel);
         }
 
@@ -893,6 +1070,19 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
                     ctx->eqScratch32[i * 2] = static_cast<int32_t>(outL);
                     ctx->eqScratch32[i * 2 + 1] = static_cast<int32_t>(outR);
                 }
+            }
+        }
+
+        if (needDrc) {
+            ctx->drc.Process(ctx->eqScratch32.data(), frameCount);
+
+            const uint64_t now = NowMs();
+            if ((now - ctx->drcMeterLastEmitMs) >= 100) {
+                ctx->drcMeterLastEmitMs = now;
+                QueueDrcMeterEvent(ctx,
+                                  static_cast<double>(ctx->drc.GetLastLevelDb()),
+                                  static_cast<double>(ctx->drc.GetLastGainDb()),
+                                  static_cast<double>(ctx->drc.GetLastGrDb()));
             }
         }
 
@@ -1034,6 +1224,10 @@ void FinalizePcmStreamDecoder(napi_env env, void *finalize_data, void * /*finali
         napi_delete_reference(env, ctx->onErrorRef);
         ctx->onErrorRef = nullptr;
     }
+    if (ctx->onDrcMeterRef != nullptr) {
+        napi_delete_reference(env, ctx->onDrcMeterRef);
+        ctx->onDrcMeterRef = nullptr;
+    }
 
     delete ctx;
 }
@@ -1145,12 +1339,14 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     // callbacks
     napi_value onProgress = nullptr;
     napi_value onError = nullptr;
+    napi_value onDrcMeter = nullptr;
     if (argc >= 3 && args[2] != nullptr) {
         napi_valuetype t;
         napi_typeof(env, args[2], &t);
         if (t == napi_object) {
             napi_get_named_property(env, args[2], "onProgress", &onProgress);
             napi_get_named_property(env, args[2], "onError", &onError);
+            napi_get_named_property(env, args[2], "onDrcMeter", &onDrcMeter);
         }
     }
 
@@ -1163,6 +1359,7 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     ctx->selfRef = nullptr;
     ctx->onProgressRef = nullptr;
     ctx->onErrorRef = nullptr;
+    ctx->onDrcMeterRef = nullptr;
     ctx->inputPathOrUri = input;
     ctx->sampleRate = sampleRate;
     ctx->channelCount = channelCount;
@@ -1201,6 +1398,17 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     ctx->eqAppliedVersion = 0;
     ctx->eqSampleRate = 0;
     ctx->eqChannelCount = 0;
+
+    // DRC defaults (disabled)
+    ctx->drcEnabled.store(false);
+    ctx->drcVersion.store(1);
+    ctx->drcThresholdDb100.store(static_cast<int32_t>(-20 * 100));
+    ctx->drcRatio1000.store(static_cast<int32_t>(4 * 1000));
+    ctx->drcAttackMs100.store(static_cast<int32_t>(10 * 100));
+    ctx->drcReleaseMs100.store(static_cast<int32_t>(100 * 100));
+    ctx->drcMakeupDb100.store(0);
+    ctx->drcAppliedVersion = 0;
+    ctx->drcMeterLastEmitMs = 0;
 
     // Initialize seek state.
     ctx->seekSeq_.store(0);
@@ -1243,6 +1451,14 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
         napi_typeof(env, onError, &t);
         if (t == napi_function) {
             napi_create_reference(env, onError, 1, &ctx->onErrorRef);
+        }
+    }
+
+    if (onDrcMeter != nullptr) {
+        napi_valuetype t;
+        napi_typeof(env, onDrcMeter, &t);
+        if (t == napi_function) {
+            napi_create_reference(env, onDrcMeter, 1, &ctx->onDrcMeterRef);
         }
     }
 
@@ -1292,6 +1508,14 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     napi_create_function(env, "setChannelVolumes", NAPI_AUTO_LENGTH, PcmDecoderSetChannelVolumes, ctx,
                          &setChannelVolumesFn);
     napi_set_named_property(env, decoderObj, "setChannelVolumes", setChannelVolumesFn);
+
+    napi_value setDrcEnabledFn;
+    napi_create_function(env, "setDrcEnabled", NAPI_AUTO_LENGTH, PcmDecoderSetDrcEnabled, ctx, &setDrcEnabledFn);
+    napi_set_named_property(env, decoderObj, "setDrcEnabled", setDrcEnabledFn);
+
+    napi_value setDrcParamsFn;
+    napi_create_function(env, "setDrcParams", NAPI_AUTO_LENGTH, PcmDecoderSetDrcParams, ctx, &setDrcParamsFn);
+    napi_set_named_property(env, decoderObj, "setDrcParams", setDrcParamsFn);
 
     // Seek 功能方法
     napi_value seekToFn;

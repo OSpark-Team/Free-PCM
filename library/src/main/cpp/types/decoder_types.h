@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include "../pcm_equalizer.h"
+#include "../drc_processor.h"
 #include "../buffer/ring_buffer.h"
 
 // ============================================================================
@@ -23,6 +24,7 @@ enum class DecoderEventType {
     Progress = 1,   ///< 进度更新
     Error = 2,      ///< 错误发生
     Seek = 3,       ///< Seek 结果（用于 Promise resolve/reject）
+    DrcMeter = 4,   ///< DRC meter (level/gain/GR)
 };
 
 /**
@@ -50,6 +52,11 @@ struct DecoderEventPayload {
     uint64_t seekSeq = 0;
     int64_t seekTargetMs = 0;
     bool seekSuccess = false;
+
+    // DRC meter
+    double drcLevelDb = 0.0;
+    double drcGainDb = 0.0;
+    double drcGrDb = 0.0;
 };
 
 // ============================================================================
@@ -105,6 +112,7 @@ struct PcmStreamDecoderContext {
     napi_ref selfRef;
     napi_ref onProgressRef;
     napi_ref onErrorRef;
+    napi_ref onDrcMeterRef;
 
     std::string inputPathOrUri;
     int32_t sampleRate;
@@ -139,6 +147,20 @@ struct PcmStreamDecoderContext {
     int32_t eqSampleRate;
     int32_t eqChannelCount;
     PcmEqualizer eq;
+
+    // DRC (dynamic range compression)
+    std::atomic<bool> drcEnabled;
+    std::atomic<uint32_t> drcVersion;
+    std::atomic<int32_t> drcThresholdDb100;   // dB * 100
+    std::atomic<int32_t> drcRatio1000;        // ratio * 1000
+    std::atomic<int32_t> drcAttackMs100;      // ms * 100
+    std::atomic<int32_t> drcReleaseMs100;     // ms * 100
+    std::atomic<int32_t> drcMakeupDb100;      // dB * 100
+
+    uint32_t drcAppliedVersion;
+    DrcProcessor drc;
+
+    uint64_t drcMeterLastEmitMs;
 
     std::vector<int16_t> eqScratch16;
     std::vector<int32_t> eqScratch32;

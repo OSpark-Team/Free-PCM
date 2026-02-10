@@ -25,6 +25,7 @@ add_library(library SHARED
     # Audio decoder
     audio_decoder.cpp
     pcm_equalizer.cpp
+    drc_processor.cpp
 
     # Buffer module
     buffer/ring_buffer.cpp)

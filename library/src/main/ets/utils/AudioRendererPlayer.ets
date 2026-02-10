@@ -639,4 +639,30 @@ export class AudioRendererPlayer {
     }
     this.decoder.setChannelVolumes(leftCoeff, rightCoeff);
   }
+
+  /**
+   * 启用/禁用动态范围压缩（DRC）
+   */
+  public setDrcEnabled(enabled: boolean): void {
+    if (!this.decoder) {
+      throw new Error('Decoder not initialized');
+    }
+    if (!this.decoder.setDrcEnabled) {
+      throw new Error('setDrcEnabled is not supported by this decoder');
+    }
+    this.decoder.setDrcEnabled(enabled);
+  }
+
+  /**
+   * 设置 DRC 参数
+   */
+  public setDrcParams(thresholdDb: number, ratio: number, attackMs: number, releaseMs: number, makeupGainDb: number): void {
+    if (!this.decoder) {
+      throw new Error('Decoder not initialized');
+    }
+    if (!this.decoder.setDrcParams) {
+      throw new Error('setDrcParams is not supported by this decoder');
+    }
+    this.decoder.setDrcParams(thresholdDb, ratio, attackMs, releaseMs, makeupGainDb);
+  }
 }
