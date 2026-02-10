@@ -9,145 +9,143 @@ namespace napi_stream_decoder {
 // 流式解码器事件回调
 // ============================================================================
 
-void CallJsDecoderEvent(napi_env env, napi_value /*jsCb*/, void* context, void* data)
-{
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(context);
-    std::unique_ptr<DecoderEventPayload> payload(static_cast<DecoderEventPayload*>(data));
+void CallJsDecoderEvent(napi_env env, napi_value /*jsCb*/, void *context, void *data) {
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(context);
+    std::unique_ptr<DecoderEventPayload> payload(static_cast<DecoderEventPayload *>(data));
     if (!ctx || !payload || env == nullptr) {
         return;
     }
 
     switch (payload->type) {
-        case DecoderEventType::Ready: {
-            if (ctx->readyDeferred == nullptr) {
-                ctx->readySettled = true;
-                break;
-            }
-
-            napi_value info;
-            napi_create_object(env, &info);
-
-            napi_value sr;
-            napi_create_int32(env, payload->sampleRate, &sr);
-            napi_set_named_property(env, info, "sampleRate", sr);
-
-            napi_value cc;
-            napi_create_int32(env, payload->channelCount, &cc);
-            napi_set_named_property(env, info, "channelCount", cc);
-
-            // sampleFormat: use string for ArkTS friendliness
-            napi_value sf;
-            if (payload->sampleFormat == 3) {
-                napi_create_string_utf8(env, "s32le", NAPI_AUTO_LENGTH, &sf);
-            } else if (payload->sampleFormat == 1) {
-                napi_create_string_utf8(env, "s16le", NAPI_AUTO_LENGTH, &sf);
-            } else {
-                napi_create_string_utf8(env, "unknown", NAPI_AUTO_LENGTH, &sf);
-            }
-            napi_set_named_property(env, info, "sampleFormat", sf);
-
-            // sampleFormatCode: numeric format for easier handling
-            napi_value sfc;
-            napi_create_int32(env, payload->sampleFormat, &sfc);
-            napi_set_named_property(env, info, "sampleFormatCode", sfc);
-
-            napi_value dur;
-            napi_create_double(env, static_cast<double>(payload->durationMs), &dur);
-            napi_set_named_property(env, info, "durationMs", dur);
-
-            napi_resolve_deferred(env, ctx->readyDeferred, info);
-            ctx->readyDeferred = nullptr;
+    case DecoderEventType::Ready: {
+        if (ctx->readyDeferred == nullptr) {
             ctx->readySettled = true;
             break;
         }
-        case DecoderEventType::Progress: {
-            if (ctx->onProgressRef == nullptr) {
-                break;
-            }
+
+        napi_value info;
+        napi_create_object(env, &info);
+
+        napi_value sr;
+        napi_create_int32(env, payload->sampleRate, &sr);
+        napi_set_named_property(env, info, "sampleRate", sr);
+
+        napi_value cc;
+        napi_create_int32(env, payload->channelCount, &cc);
+        napi_set_named_property(env, info, "channelCount", cc);
+
+        // sampleFormat: use string for ArkTS friendliness
+        napi_value sf;
+        if (payload->sampleFormat == 3) {
+            napi_create_string_utf8(env, "s32le", NAPI_AUTO_LENGTH, &sf);
+        } else if (payload->sampleFormat == 1) {
+            napi_create_string_utf8(env, "s16le", NAPI_AUTO_LENGTH, &sf);
+        } else {
+            napi_create_string_utf8(env, "unknown", NAPI_AUTO_LENGTH, &sf);
+        }
+        napi_set_named_property(env, info, "sampleFormat", sf);
+
+        // sampleFormatCode: numeric format for easier handling
+        napi_value sfc;
+        napi_create_int32(env, payload->sampleFormat, &sfc);
+        napi_set_named_property(env, info, "sampleFormatCode", sfc);
+
+        napi_value dur;
+        napi_create_double(env, static_cast<double>(payload->durationMs), &dur);
+        napi_set_named_property(env, info, "durationMs", dur);
+
+        napi_resolve_deferred(env, ctx->readyDeferred, info);
+        ctx->readyDeferred = nullptr;
+        ctx->readySettled = true;
+        break;
+    }
+    case DecoderEventType::Progress: {
+        if (ctx->onProgressRef == nullptr) {
+            break;
+        }
+        napi_value cb;
+        napi_get_reference_value(env, ctx->onProgressRef, &cb);
+        if (cb == nullptr) {
+            break;
+        }
+
+        napi_value arg;
+        napi_create_object(env, &arg);
+
+        napi_value p;
+        napi_create_double(env, payload->progress, &p);
+        napi_set_named_property(env, arg, "progress", p);
+
+        napi_value pts;
+        napi_create_double(env, static_cast<double>(payload->ptsMs), &pts);
+        napi_set_named_property(env, arg, "ptsMs", pts);
+
+        napi_value dur;
+        napi_create_double(env, static_cast<double>(payload->durationMs), &dur);
+        napi_set_named_property(env, arg, "durationMs", dur);
+
+        napi_value argv[1] = {arg};
+        napi_value result;
+        napi_call_function(env, nullptr, cb, 1, argv, &result);
+        break;
+    }
+    case DecoderEventType::Error: {
+        // Store for done rejection.
+        ctx->lastErrStage = payload->stage;
+        ctx->lastErrCode = payload->code;
+        ctx->lastErrMessage = payload->message;
+
+        napi_value errObj = napi_utils::CreateErrorObject(env, payload->stage, payload->code, payload->message);
+
+        if (ctx->readyDeferred != nullptr) {
+            napi_reject_deferred(env, ctx->readyDeferred, errObj);
+            ctx->readyDeferred = nullptr;
+            ctx->readySettled = true;
+        }
+
+        if (ctx->onErrorRef != nullptr) {
             napi_value cb;
-            napi_get_reference_value(env, ctx->onProgressRef, &cb);
-            if (cb == nullptr) {
-                break;
+            napi_get_reference_value(env, ctx->onErrorRef, &cb);
+            if (cb != nullptr) {
+                napi_value argv[1] = {errObj};
+                napi_value result;
+                napi_call_function(env, nullptr, cb, 1, argv, &result);
             }
+        }
 
-            napi_value arg;
-            napi_create_object(env, &arg);
-
-            napi_value p;
-            napi_create_double(env, payload->progress, &p);
-            napi_set_named_property(env, arg, "progress", p);
-
-            napi_value pts;
-            napi_create_double(env, static_cast<double>(payload->ptsMs), &pts);
-            napi_set_named_property(env, arg, "ptsMs", pts);
-
-            napi_value dur;
-            napi_create_double(env, static_cast<double>(payload->durationMs), &dur);
-            napi_set_named_property(env, arg, "durationMs", dur);
-
-            napi_value argv[1] = {arg};
-            napi_value result;
-            napi_call_function(env, nullptr, cb, 1, argv, &result);
+        break;
+    }
+    case DecoderEventType::Seek: {
+        if (ctx->seekDeferred == nullptr) {
             break;
         }
-        case DecoderEventType::Error: {
-            // Store for done rejection.
-            ctx->lastErrStage = payload->stage;
-            ctx->lastErrCode = payload->code;
-            ctx->lastErrMessage = payload->message;
-
-            napi_value errObj = napi_utils::CreateErrorObject(env, payload->stage, payload->code, payload->message);
-
-            if (ctx->readyDeferred != nullptr) {
-                napi_reject_deferred(env, ctx->readyDeferred, errObj);
-                ctx->readyDeferred = nullptr;
-                ctx->readySettled = true;
-            }
-
-            if (ctx->onErrorRef != nullptr) {
-                napi_value cb;
-                napi_get_reference_value(env, ctx->onErrorRef, &cb);
-                if (cb != nullptr) {
-                    napi_value argv[1] = {errObj};
-                    napi_value result;
-                    napi_call_function(env, nullptr, cb, 1, argv, &result);
-                }
-            }
-
+        if (ctx->seekDeferredSeq != payload->seekSeq) {
             break;
         }
-        case DecoderEventType::Seek: {
-            if (ctx->seekDeferred == nullptr) {
-                break;
-            }
-            if (ctx->seekDeferredSeq != payload->seekSeq) {
-                break;
-            }
 
-            if (payload->seekSuccess) {
-                napi_value undef;
-                napi_get_undefined(env, &undef);
-                napi_resolve_deferred(env, ctx->seekDeferred, undef);
-            } else {
-                napi_value errObj = napi_utils::CreateErrorObject(env, "seek", payload->code, payload->message);
-                napi_reject_deferred(env, ctx->seekDeferred, errObj);
-            }
-            ctx->seekDeferred = nullptr;
-            break;
+        if (payload->seekSuccess) {
+            napi_value undef;
+            napi_get_undefined(env, &undef);
+            napi_resolve_deferred(env, ctx->seekDeferred, undef);
+        } else {
+            napi_value errObj = napi_utils::CreateErrorObject(env, "seek", payload->code, payload->message);
+            napi_reject_deferred(env, ctx->seekDeferred, errObj);
         }
-        default:
-            break;
+        ctx->seekDeferred = nullptr;
+        break;
+    }
+    default:
+        break;
     }
 }
 
-static void QueueSeekEvent(PcmStreamDecoderContext* ctx, uint64_t seq, bool success, int32_t code,
-                           const std::string& message, int64_t targetMs)
-{
+static void QueueSeekEvent(PcmStreamDecoderContext *ctx, uint64_t seq, bool success, int32_t code,
+                           const std::string &message, int64_t targetMs) {
     if (!ctx || ctx->eventTsfn == nullptr) {
         return;
     }
 
-    auto* payload = new DecoderEventPayload();
+    auto *payload = new DecoderEventPayload();
     payload->type = DecoderEventType::Seek;
     payload->seekSeq = seq;
     payload->seekTargetMs = targetMs;
@@ -162,13 +160,12 @@ static void QueueSeekEvent(PcmStreamDecoderContext* ctx, uint64_t seq, bool succ
 // 流式解码器方法
 // ============================================================================
 
-napi_value PcmDecoderFill(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderFill(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, args, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx || argc < 1) {
         napi_throw_error(env, nullptr, "fill(buffer) requires 1 argument");
         return nullptr;
@@ -181,7 +178,7 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info)
         return nullptr;
     }
 
-    void* buf = nullptr;
+    void *buf = nullptr;
     size_t len = 0;
     napi_get_arraybuffer_info(env, args[0], &buf, &len);
     if (!buf || len == 0) {
@@ -192,10 +189,10 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info)
 
     size_t n = 0;
     if (ctx->ring) {
-        n = ctx->ring->Read(reinterpret_cast<uint8_t*>(buf), len);
+        n = ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), len);
     }
     if (n < len) {
-        memset(reinterpret_cast<uint8_t*>(buf) + n, 0, len - n);
+        memset(reinterpret_cast<uint8_t *>(buf) + n, 0, len - n);
     }
 
     napi_value out;
@@ -206,13 +203,12 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info)
 // For AudioRenderer.on('writeData') (API 12+):
 // - return 0 when not enough data, so caller can return INVALID without consuming the ring
 // - return full buffer length when enough data, or when EOS is marked (with padding)
-napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, args, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx || argc < 1) {
         napi_throw_error(env, nullptr, "fillForWriteData(buffer) requires 1 argument");
         return nullptr;
@@ -225,7 +221,7 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info)
         return nullptr;
     }
 
-    void* buf = nullptr;
+    void *buf = nullptr;
     size_t len = 0;
     napi_get_arraybuffer_info(env, args[0], &buf, &len);
     if (!buf || len == 0) {
@@ -242,16 +238,16 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info)
 
     const size_t avail = ctx->ring->Available();
     if (avail >= len) {
-        (void)ctx->ring->Read(reinterpret_cast<uint8_t*>(buf), len);
+        (void)ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), len);
         napi_value out;
         napi_create_int32(env, static_cast<int32_t>(len), &out);
         return out;
     }
 
     if (ctx->ring->IsEosMarked() && avail > 0) {
-        const size_t n = ctx->ring->Read(reinterpret_cast<uint8_t*>(buf), avail);
+        const size_t n = ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), avail);
         if (n < len) {
-            memset(reinterpret_cast<uint8_t*>(buf) + n, 0, len - n);
+            memset(reinterpret_cast<uint8_t *>(buf) + n, 0, len - n);
         }
         napi_value out;
         napi_create_int32(env, static_cast<int32_t>(len), &out);
@@ -263,12 +259,11 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info)
     return zero;
 }
 
-napi_value PcmDecoderClose(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderClose(napi_env env, napi_callback_info info) {
     size_t argc = 0;
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, nullptr, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (ctx) {
         ctx->cancel.store(true);
         if (ctx->ring) {
@@ -280,13 +275,12 @@ napi_value PcmDecoderClose(napi_env env, napi_callback_info info)
     return undef;
 }
 
-napi_value PcmDecoderSetEqEnabled(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderSetEqEnabled(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, args, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx || argc < 1) {
         napi_throw_error(env, nullptr, "setEqEnabled(enabled) requires 1 argument");
         return nullptr;
@@ -304,13 +298,12 @@ napi_value PcmDecoderSetEqEnabled(napi_env env, napi_callback_info info)
     return undef;
 }
 
-napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, args, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx || argc < 1) {
         napi_throw_error(env, nullptr, "setEqGains(gainsDb) requires 1 argument");
         return nullptr;
@@ -365,13 +358,12 @@ napi_value PcmDecoderSetEqGains(napi_env env, napi_callback_info info)
 // Seek 功能实现
 // ============================================================================
 
-napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, args, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx || argc < 1) {
         napi_throw_error(env, nullptr, "seekTo(positionMs) requires 1 argument");
         return nullptr;
@@ -421,13 +413,12 @@ napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info)
     return undef;
 }
 
-napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, args, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx || argc < 1) {
         napi_throw_error(env, nullptr, "seekToAsync(positionMs) requires 1 argument");
         return nullptr;
@@ -486,12 +477,11 @@ napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info)
     return promise;
 }
 
-napi_value PcmDecoderGetPosition(napi_env env, napi_callback_info info)
-{
+napi_value PcmDecoderGetPosition(napi_env env, napi_callback_info info) {
     size_t argc = 0;
-    void* data = nullptr;
+    void *data = nullptr;
     napi_get_cb_info(env, info, &argc, nullptr, nullptr, &data);
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx) {
         napi_throw_error(env, nullptr, "Failed to get decoder context");
         return nullptr;
@@ -511,9 +501,8 @@ napi_value PcmDecoderGetPosition(napi_env env, napi_callback_info info)
 // 流式解码器异步工作
 // ============================================================================
 
-void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
-{
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx) {
         return;
     }
@@ -534,70 +523,82 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         ctx->actualChannelCount = cc;
         ctx->actualSampleFormat = sf;
 
-        // Decide ring buffer size:
-        // - ctx->ringBytes > 0: fixed size from options
-        // - ctx->ringBytes == 0: adaptive [64KB..512KB], stair-stepped
         size_t rb = ctx->ringBytes;
         if (rb == 0) {
-            constexpr size_t kMin = 64 * 1024;
-            constexpr size_t kMax = 512 * 1024;
-            constexpr size_t kStep = 64 * 1024;
+            // --- 动态常数定义 ---
+            constexpr size_t kStep = 64 * 1024;      // 64KB 步进对齐
+            constexpr size_t kMinLimit = 128 * 1024; // 最小提升到 128KB，确保 Hi-Res 基础缓冲
+            size_t kMaxLimit = 1024 * 1024;          // 默认最大 1MB
 
-            const bool isHttp = (ctx->inputPathOrUri.rfind("http://", 0) == 0) ||
-                                (ctx->inputPathOrUri.rfind("https://", 0) == 0);
+            const bool isHttp =
+                (ctx->inputPathOrUri.rfind("http://", 0) == 0) || (ctx->inputPathOrUri.rfind("https://", 0) == 0);
 
-            const int32_t bytesPerSample = (sf == 3) ? 4 : 2;
-            const uint64_t bytesPerSecond = (sr > 0 && cc > 0)
-                                                ? static_cast<uint64_t>(sr) * static_cast<uint64_t>(cc) * static_cast<uint64_t>(bytesPerSample)
-                                                : 0;
+            // 精确计算每秒字节数 (BPS)
+            const int32_t bytesPerSample = (sf >= 3 || sf == 2) ? 4 : 2;
+            const uint64_t bytesPerSecond = (sr > 0 && cc > 0) ? static_cast<uint64_t>(sr) * static_cast<uint64_t>(cc) *
+                                                                     static_cast<uint64_t>(bytesPerSample)
+                                                               : 0;
 
-            // Target seconds: bigger for network + long content, smaller for short content
-            // so EQ changes take effect faster.
+            // 针对高采样率 (如 192k) 自动提升上限
+            // 如果是 192k/24bit，BPS 超过 1MB/s，我们将上限放宽到 2MB 或 4MB
+            if (bytesPerSecond > 1000000) {
+                kMaxLimit = 2 * 1024 * 1024;
+            }
+
+            // 动态计算目标时长 (targetSec)
             double targetSec = 0.0;
             if (durMs > 0) {
+                // 本地长音频或普通曲目
                 if (durMs < 30 * 1000) {
-                    targetSec = 0.25;
-                } else if (durMs < 3 * 60 * 1000) {
-                    targetSec = 0.35;
+                    targetSec = 0.30; // 短音频保持灵敏度
                 } else if (durMs < 10 * 60 * 1000) {
-                    targetSec = 0.50;
+                    targetSec = 0.60; // 常规曲目平衡点
                 } else {
-                    targetSec = 0.75;
+                    targetSec = 0.80; // 长音频侧重稳定
                 }
             } else {
-                targetSec = isHttp ? 1.00 : 0.50;
+                // 网络直播流或未知长度
+                targetSec = isHttp ? 1.20 : 0.60;
             }
+
+            // 环境补偿
             if (isHttp) {
-                targetSec += 0.25;
+                targetSec += 0.30; // 网络环境下增加 300ms 冗余
             }
 
-            // High throughput PCM needs more bytes for the same time window.
-            if (bytesPerSecond >= 500000) {
-                targetSec += 0.15;
-            }
-
+            // 计算期望字节数
             uint64_t desired = 0;
             if (bytesPerSecond > 0 && targetSec > 0.0) {
                 desired = static_cast<uint64_t>(static_cast<double>(bytesPerSecond) * targetSec);
             }
 
+            // 边界处理与阶梯化对齐
             rb = static_cast<size_t>(desired);
-            if (rb < kMin) rb = kMin;
-            if (rb > kMax) rb = kMax;
+
+            // 确保不低于最小值，不超过当前规格下的最大值
+            if (rb < kMinLimit)
+                rb = kMinLimit;
+            if (rb > kMaxLimit)
+                rb = kMaxLimit;
+
+            // 向上取整到 kStep 的倍数 (对 CPU/内存总线更友好)
             rb = ((rb + kStep - 1) / kStep) * kStep;
-            if (rb < kMin) rb = kMin;
-            if (rb > kMax) rb = kMax;
+
+            // 再次约束边界
+            if (rb < kMinLimit)
+                rb = kMinLimit;
+            if (rb > kMaxLimit)
+                rb = kMaxLimit;
 
             ctx->ringBytes = rb;
         }
 
         // 重新创建 PcmRingBuffer，使用实际的音频参数
-        const int32_t bytesPerSample = (sf == 3) ? 4 : 2;  // S32LE=4, S16LE=2
-        ctx->ring = std::make_unique<audio::PcmRingBuffer>(
-            rb,
-            sr,            // sampleRate
-            cc,            // channels
-            bytesPerSample // bytesPerSample
+        const int32_t bytesPerSample = (sf == 3) ? 4 : 2; // S32LE=4, S16LE=2
+        ctx->ring = std::make_unique<audio::PcmRingBuffer>(rb,
+                                                           sr,            // sampleRate
+                                                           cc,            // channels
+                                                           bytesPerSample // bytesPerSample
         );
 
         auto payload = std::make_unique<DecoderEventPayload>();
@@ -640,7 +641,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         }
     };
 
-    AudioDecoder::PcmDataCallback pcmCb = [ctx](const uint8_t* pcm, size_t size, int64_t /*ptsMs*/) {
+    AudioDecoder::PcmDataCallback pcmCb = [ctx](const uint8_t *pcm, size_t size, int64_t /*ptsMs*/) {
         if (ctx->cancel.load()) {
             return false;
         }
@@ -695,15 +696,16 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         memcpy(ctx->eqScratch.data(), pcm, bytesToProcess);
         if (bytesToProcess < size) {
             // keep the tail bytes (should be rare)
-            memcpy(reinterpret_cast<uint8_t*>(ctx->eqScratch.data()) + bytesToProcess, pcm + bytesToProcess, size - bytesToProcess);
+            memcpy(reinterpret_cast<uint8_t *>(ctx->eqScratch.data()) + bytesToProcess, pcm + bytesToProcess,
+                   size - bytesToProcess);
         }
 
         ctx->eq.Process(ctx->eqScratch.data(), frameCount);
 
-        return ctx->ring->Push(reinterpret_cast<const uint8_t*>(ctx->eqScratch.data()), size, &ctx->cancel);
+        return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch.data()), size, &ctx->cancel);
     };
 
-    AudioDecoder::ErrorCallback errorCb = [ctx](const std::string& stage, int32_t code, const std::string& message) {
+    AudioDecoder::ErrorCallback errorCb = [ctx](const std::string &stage, int32_t code, const std::string &message) {
         auto payload = std::make_unique<DecoderEventPayload>();
         payload->type = DecoderEventType::Error;
         payload->sampleRate = 0;
@@ -722,7 +724,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         }
     };
 
-    AudioDecoder::SeekPollCallback seekPollCb = [ctx](int64_t& targetMs, uint64_t& seq) {
+    AudioDecoder::SeekPollCallback seekPollCb = [ctx](int64_t &targetMs, uint64_t &seq) {
         const uint64_t req = ctx->seekSeq_.load();
         const uint64_t handled = ctx->seekHandledSeq_.load();
         if (req == handled) {
@@ -756,19 +758,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
         ctx->seekAwaitSeq.store(seq);
     };
 
-    bool ok = decoder.DecodeToPcmStream(
-        ctx->inputPathOrUri,
-        ctx->sampleRate,
-        ctx->channelCount,
-        ctx->bitrate,
-        infoCb,
-        progressCb,
-        pcmCb,
-        errorCb,
-        &ctx->cancel,
-        ctx->sampleFormat,
-        seekPollCb,
-        seekAppliedCb);
+    bool ok = decoder.DecodeToPcmStream(ctx->inputPathOrUri, ctx->sampleRate, ctx->channelCount, ctx->bitrate, infoCb,
+                                        progressCb, pcmCb, errorCb, &ctx->cancel, ctx->sampleFormat, seekPollCb,
+                                        seekAppliedCb);
 
     ctx->success = ok;
     if (ctx->ring) {
@@ -776,9 +768,8 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void* data)
     }
 }
 
-void CompletePcmStreamDecode(napi_env env, napi_status /*status*/, void* data)
-{
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(data);
+void CompletePcmStreamDecode(napi_env env, napi_status /*status*/, void *data) {
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx) {
         return;
     }
@@ -830,9 +821,8 @@ void CompletePcmStreamDecode(napi_env env, napi_status /*status*/, void* data)
     ctx->work = nullptr;
 }
 
-void FinalizePcmStreamDecoder(napi_env env, void* finalize_data, void* /*finalize_hint*/)
-{
-    auto* ctx = static_cast<PcmStreamDecoderContext*>(finalize_data);
+void FinalizePcmStreamDecoder(napi_env env, void *finalize_data, void * /*finalize_hint*/) {
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(finalize_data);
     if (!ctx) {
         return;
     }
@@ -858,8 +848,7 @@ void FinalizePcmStreamDecoder(napi_env env, void* finalize_data, void* /*finaliz
 // 流式解码器创建
 // ============================================================================
 
-napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
-{
+napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value args[3] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -880,7 +869,7 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     int32_t sampleRate = 0;
     int32_t channelCount = 0;
     int32_t bitrate = 0;
-    int32_t sampleFormat = 1;  // Default to S16LE (1), S32LE = 3
+    int32_t sampleFormat = 1; // Default to S16LE (1), S32LE = 3
     // ringBytes:
     // - 0 means auto (adaptive by audio format + duration + source type)
     // - otherwise fixed ring buffer size
@@ -971,7 +960,7 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
         }
     }
 
-    auto* ctx = new PcmStreamDecoderContext();
+    auto *ctx = new PcmStreamDecoderContext();
     ctx->env = env;
     ctx->work = nullptr;
     ctx->eventTsfn = nullptr;
@@ -1000,11 +989,10 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
 
     // 使用默认参数临时创建 PcmRingBuffer，稍后在 infoCb 中重新创建
     const size_t initialRingBytes = (ringBytes > 0) ? ringBytes : (64 * 1024);
-    ctx->ring = std::make_unique<audio::PcmRingBuffer>(
-        initialRingBytes,
-        sampleRate > 0 ? sampleRate : 48000,  // 默认采样率
-        channelCount > 0 ? channelCount : 2,  // 默认声道数
-        2  // 默认每样本字节数（S16LE）
+    ctx->ring = std::make_unique<audio::PcmRingBuffer>(initialRingBytes,
+                                                       sampleRate > 0 ? sampleRate : 48000, // 默认采样率
+                                                       channelCount > 0 ? channelCount : 2, // 默认声道数
+                                                       2 // 默认每样本字节数（S16LE）
     );
 
     ctx->eqEnabled.store(optEqEnabled);
@@ -1062,28 +1050,19 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
 
     // Create a noop JS function required by TSFN.
     napi_value noop;
-    napi_create_function(env, "noop", NAPI_AUTO_LENGTH,
-                         [](napi_env env, napi_callback_info /*info*/) -> napi_value {
-                             napi_value undef;
-                             napi_get_undefined(env, &undef);
-                             return undef;
-                         },
-                         nullptr, &noop);
+    napi_create_function(
+        env, "noop", NAPI_AUTO_LENGTH,
+        [](napi_env env, napi_callback_info /*info*/) -> napi_value {
+            napi_value undef;
+            napi_get_undefined(env, &undef);
+            return undef;
+        },
+        nullptr, &noop);
 
     napi_value tsfnName;
     napi_create_string_utf8(env, "PcmStreamDecoderEvent", NAPI_AUTO_LENGTH, &tsfnName);
-    napi_create_threadsafe_function(
-        env,
-        noop,
-        nullptr,
-        tsfnName,
-        0,
-        1,
-        nullptr,
-        nullptr,
-        ctx,
-        CallJsDecoderEvent,
-        &ctx->eventTsfn);
+    napi_create_threadsafe_function(env, noop, nullptr, tsfnName, 0, 1, nullptr, nullptr, ctx, CallJsDecoderEvent,
+                                    &ctx->eventTsfn);
 
     // methods
     napi_value fillFn;
@@ -1091,7 +1070,8 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info)
     napi_set_named_property(env, decoderObj, "fill", fillFn);
 
     napi_value fillForWriteDataFn;
-    napi_create_function(env, "fillForWriteData", NAPI_AUTO_LENGTH, PcmDecoderFillForWriteData, ctx, &fillForWriteDataFn);
+    napi_create_function(env, "fillForWriteData", NAPI_AUTO_LENGTH, PcmDecoderFillForWriteData, ctx,
+                         &fillForWriteDataFn);
     napi_set_named_property(env, decoderObj, "fillForWriteData", fillForWriteDataFn);
 
     napi_value closeFn;
