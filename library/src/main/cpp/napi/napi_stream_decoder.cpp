@@ -977,104 +977,68 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             ctx->drc.SetEnabled(false);
         }
 
+        // Float DSP pipeline to avoid hard clipping artifacts.
+        ctx->dspScratchF.resize(sampleCount);
+
+        float norm = 1.0f;
+        float denorm = 1.0f;
         if (bytesPerSample == 2) {
-            ctx->eqScratch16.resize(sampleCount);
-            memcpy(ctx->eqScratch16.data(), pcm, bytesToProcess);
-            if (bytesToProcess < size) {
-                memcpy(reinterpret_cast<uint8_t *>(ctx->eqScratch16.data()) + bytesToProcess, pcm + bytesToProcess,
-                       size - bytesToProcess);
+            norm = 1.0f / 32768.0f;
+            denorm = 32768.0f;
+
+            const int16_t* in = reinterpret_cast<const int16_t*>(pcm);
+            for (size_t i = 0; i < sampleCount; i++) {
+                ctx->dspScratchF[i] = static_cast<float>(in[i]) * norm;
+            }
+        } else {
+            // S32LE: choose normalization based on observed magnitude and keep it symmetric.
+            const int32_t* in = reinterpret_cast<const int32_t*>(pcm);
+            int64_t maxAbs = 0;
+            const size_t probe = (sampleCount < 512) ? sampleCount : 512;
+            for (size_t i = 0; i < probe; i++) {
+                int64_t v = static_cast<int64_t>(in[i]);
+                if (v < 0) v = -v;
+                if (v > maxAbs) maxAbs = v;
             }
 
-            if (needEq) {
-                ctx->eq.Process(ctx->eqScratch16.data(), frameCount);
+            // S32LE can come in different effective scales:
+            // - 16-bit scale: abs <= ~32768
+            // - 24-bit scale: abs <= ~8388608 (2^23)
+            // - Q31 scale:    abs up to ~2^31
+            if (maxAbs <= (1LL << 20)) {
+                norm = 1.0f / 32768.0f;
+            } else if (maxAbs <= (1LL << 27)) {
+                norm = 1.0f / 8388608.0f;
+            } else {
+                norm = 1.0f / 2147483648.0f;
             }
-
-            if (needChanVol) {
-                if (ch == 1) {
-                    for (size_t i = 0; i < frameCount; i++) {
-                        const int32_t s = static_cast<int32_t>(ctx->eqScratch16[i]);
-                        int32_t out = static_cast<int32_t>((static_cast<int64_t>(s) * volL1000) / 1000);
-                        if (out > 32767) out = 32767;
-                        if (out < -32768) out = -32768;
-                        ctx->eqScratch16[i] = static_cast<int16_t>(out);
-                    }
-                } else {
-                    for (size_t i = 0; i < frameCount; i++) {
-                        const int32_t sl = static_cast<int32_t>(ctx->eqScratch16[i * 2]);
-                        const int32_t sr = static_cast<int32_t>(ctx->eqScratch16[i * 2 + 1]);
-
-                        int32_t outL = static_cast<int32_t>((static_cast<int64_t>(sl) * volL1000) / 1000);
-                        int32_t outR = static_cast<int32_t>((static_cast<int64_t>(sr) * volR1000) / 1000);
-
-                        if (outL > 32767) outL = 32767;
-                        if (outL < -32768) outL = -32768;
-                        if (outR > 32767) outR = 32767;
-                        if (outR < -32768) outR = -32768;
-
-                        ctx->eqScratch16[i * 2] = static_cast<int16_t>(outL);
-                        ctx->eqScratch16[i * 2 + 1] = static_cast<int16_t>(outR);
-                    }
-                }
+            denorm = 1.0f / norm;
+            for (size_t i = 0; i < sampleCount; i++) {
+                ctx->dspScratchF[i] = static_cast<float>(in[i]) * norm;
             }
-
-            if (needDrc) {
-                ctx->drc.Process(ctx->eqScratch16.data(), frameCount);
-
-            const uint64_t now = NowMs();
-            if ((now - ctx->drcMeterLastEmitMs) >= 100) {
-                ctx->drcMeterLastEmitMs = now;
-                QueueDrcMeterEvent(ctx,
-                                  static_cast<double>(ctx->drc.GetLastLevelDb()),
-                                  static_cast<double>(ctx->drc.GetLastGainDb()),
-                                  static_cast<double>(ctx->drc.GetLastGrDb()));
-            }
-            }
-
-            return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch16.data()), size, &ctx->cancel);
-        }
-
-        // S32LE
-        ctx->eqScratch32.resize(sampleCount);
-        memcpy(ctx->eqScratch32.data(), pcm, bytesToProcess);
-        if (bytesToProcess < size) {
-            memcpy(reinterpret_cast<uint8_t *>(ctx->eqScratch32.data()) + bytesToProcess, pcm + bytesToProcess,
-                   size - bytesToProcess);
         }
 
         if (needEq) {
-            ctx->eq.Process(ctx->eqScratch32.data(), frameCount);
+            ctx->eq.ProcessFloat(ctx->dspScratchF.data(), frameCount);
         }
 
         if (needChanVol) {
+            const float l = static_cast<float>(volL1000) / 1000.0f;
+            const float r = static_cast<float>(volR1000) / 1000.0f;
             if (ch == 1) {
                 for (size_t i = 0; i < frameCount; i++) {
-                    const int64_t s = static_cast<int64_t>(ctx->eqScratch32[i]);
-                    int64_t out = (s * static_cast<int64_t>(volL1000)) / 1000;
-                    if (out > 2147483647LL) out = 2147483647LL;
-                    if (out < -2147483648LL) out = -2147483648LL;
-                    ctx->eqScratch32[i] = static_cast<int32_t>(out);
+                    ctx->dspScratchF[i] *= l;
                 }
             } else {
                 for (size_t i = 0; i < frameCount; i++) {
-                    const int64_t sl = static_cast<int64_t>(ctx->eqScratch32[i * 2]);
-                    const int64_t sr = static_cast<int64_t>(ctx->eqScratch32[i * 2 + 1]);
-
-                    int64_t outL = (sl * static_cast<int64_t>(volL1000)) / 1000;
-                    int64_t outR = (sr * static_cast<int64_t>(volR1000)) / 1000;
-
-                    if (outL > 2147483647LL) outL = 2147483647LL;
-                    if (outL < -2147483648LL) outL = -2147483648LL;
-                    if (outR > 2147483647LL) outR = 2147483647LL;
-                    if (outR < -2147483648LL) outR = -2147483648LL;
-
-                    ctx->eqScratch32[i * 2] = static_cast<int32_t>(outL);
-                    ctx->eqScratch32[i * 2 + 1] = static_cast<int32_t>(outR);
+                    ctx->dspScratchF[i * 2] *= l;
+                    ctx->dspScratchF[i * 2 + 1] *= r;
                 }
             }
         }
 
         if (needDrc) {
-            ctx->drc.Process(ctx->eqScratch32.data(), frameCount);
+            ctx->drc.ProcessFloat(ctx->dspScratchF.data(), frameCount);
 
             const uint64_t now = NowMs();
             if ((now - ctx->drcMeterLastEmitMs) >= 100) {
@@ -1086,6 +1050,37 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             }
         }
 
+        // Transparent peak limiter (block-based).
+        float peak = 0.0f;
+        for (size_t i = 0; i < sampleCount; i++) {
+            const float a = std::fabs(ctx->dspScratchF[i]);
+            if (a > peak) peak = a;
+        }
+        if (peak > 0.999f) {
+            const float g = 0.999f / peak;
+            for (size_t i = 0; i < sampleCount; i++) {
+                ctx->dspScratchF[i] *= g;
+            }
+        }
+
+        if (bytesPerSample == 2) {
+            ctx->eqScratch16.resize(sampleCount);
+            for (size_t i = 0; i < sampleCount; i++) {
+                float v = ctx->dspScratchF[i] * denorm;
+                if (v > 32767.0f) v = 32767.0f;
+                if (v < -32768.0f) v = -32768.0f;
+                ctx->eqScratch16[i] = static_cast<int16_t>(std::lround(v));
+            }
+            return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch16.data()), size, &ctx->cancel);
+        }
+
+        ctx->eqScratch32.resize(sampleCount);
+        for (size_t i = 0; i < sampleCount; i++) {
+            double v = static_cast<double>(ctx->dspScratchF[i]) * static_cast<double>(denorm);
+            if (v > 2147483647.0) v = 2147483647.0;
+            if (v < -2147483648.0) v = -2147483648.0;
+            ctx->eqScratch32[i] = static_cast<int32_t>(std::llround(v));
+        }
         return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch32.data()), size, &ctx->cancel);
     };
 

@@ -280,3 +280,59 @@ void PcmEqualizer::Process(int32_t* samples, size_t frameCount)
         samples[i * 2 + 1] = ClampS32(xr / kNorm);
     }
 }
+
+void PcmEqualizer::ProcessFloat(float* samples, size_t frameCount)
+{
+    if (!ready_ || !enabled_ || samples == nullptr || frameCount == 0) {
+        return;
+    }
+
+    if (channelCount_ == 1) {
+        for (size_t i = 0; i < frameCount; i++) {
+            float x = samples[i];
+            for (size_t b = 0; b < kBandCount; b++) {
+                const Biquad& q = biquadsByCh_[0][b];
+                State& s = stateMono_[b];
+                const float y = (q.b0 * x) + (q.b1 * s.x1) + (q.b2 * s.x2) - (q.a1 * s.y1) - (q.a2 * s.y2);
+                s.x2 = s.x1;
+                s.x1 = x;
+                s.y2 = s.y1;
+                s.y1 = y;
+                x = y;
+            }
+            samples[i] = x;
+        }
+        return;
+    }
+
+    // stereo interleaved
+    for (size_t i = 0; i < frameCount; i++) {
+        float xl = samples[i * 2];
+        float xr = samples[i * 2 + 1];
+
+        for (size_t b = 0; b < kBandCount; b++) {
+            State& sl = stateStereo_[b][0];
+            State& sr = stateStereo_[b][1];
+
+            const Biquad& ql = biquadsByCh_[0][b];
+            const Biquad& qr = biquadsByCh_[1][b];
+
+            const float yl = (ql.b0 * xl) + (ql.b1 * sl.x1) + (ql.b2 * sl.x2) - (ql.a1 * sl.y1) - (ql.a2 * sl.y2);
+            sl.x2 = sl.x1;
+            sl.x1 = xl;
+            sl.y2 = sl.y1;
+            sl.y1 = yl;
+            xl = yl;
+
+            const float yr = (qr.b0 * xr) + (qr.b1 * sr.x1) + (qr.b2 * sr.x2) - (qr.a1 * sr.y1) - (qr.a2 * sr.y2);
+            sr.x2 = sr.x1;
+            sr.x1 = xr;
+            sr.y2 = sr.y1;
+            sr.y1 = yr;
+            xr = yr;
+        }
+
+        samples[i * 2] = xl;
+        samples[i * 2 + 1] = xr;
+    }
+}

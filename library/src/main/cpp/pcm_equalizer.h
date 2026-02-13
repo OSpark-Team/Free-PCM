@@ -41,6 +41,11 @@ public:
     // frameCount: number of frames (a frame contains channelCount samples).
     void Process(int32_t* samples, size_t frameCount);
 
+    // Process in-place (Float32, normalized roughly to [-1, 1]).
+    // This path preserves headroom and allows downstream limiting/DRC to avoid
+    // hard clipping artifacts.
+    void ProcessFloat(float* samples, size_t frameCount);
+
 private:
     struct Biquad {
         float b0;

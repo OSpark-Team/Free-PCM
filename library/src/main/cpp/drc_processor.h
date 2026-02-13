@@ -26,6 +26,9 @@ public:
   void Process(int16_t* samples, size_t frameCount);
   void Process(int32_t* samples, size_t frameCount);
 
+  // Float32 path (normalized roughly to [-1, 1]).
+  void ProcessFloat(float* samples, size_t frameCount);
+
   // Meter (best-effort, updated during Process calls).
   // levelDb: input peak level in dBFS (<= 0)
   // gainDb: total applied gain in dB (includes makeup)

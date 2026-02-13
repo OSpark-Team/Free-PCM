@@ -165,6 +165,9 @@ struct PcmStreamDecoderContext {
     std::vector<int16_t> eqScratch16;
     std::vector<int32_t> eqScratch32;
 
+    // Float DSP scratch (normalized)
+    std::vector<float> dspScratchF;
+
     // 用于 PcmRingBuffer 重新初始化
     size_t ringBytes;
     int32_t actualSampleRate;
