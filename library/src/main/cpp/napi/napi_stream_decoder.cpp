@@ -747,6 +747,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
     // ensure meter starts fresh
     ctx->drcMeterLastEmitMs = 0;
 
+    // Reset S32 global max for stable normalization across callbacks.
+    ctx->s32GlobalMaxAbs = 0;
+
     AudioDecoder decoder;
 
     AudioDecoder::InfoCallback infoCb = [ctx](int32_t sr, int32_t cc, int32_t sf, int64_t durMs) {
@@ -991,23 +994,27 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
                 ctx->dspScratchF[i] = static_cast<float>(in[i]) * norm;
             }
         } else {
-            // S32LE: choose normalization based on observed magnitude and keep it symmetric.
+            // S32LE: use global persistent maxAbs for stable normalization.
+            // This prevents "volume rollercoaster" when source data scale is ambiguous.
             const int32_t* in = reinterpret_cast<const int32_t*>(pcm);
-            int64_t maxAbs = 0;
-            const size_t probe = (sampleCount < 512) ? sampleCount : 512;
-            for (size_t i = 0; i < probe; i++) {
+
+            // Update global maxAbs monotonically (only increases, never decreases).
+            for (size_t i = 0; i < sampleCount; i++) {
                 int64_t v = static_cast<int64_t>(in[i]);
                 if (v < 0) v = -v;
-                if (v > maxAbs) maxAbs = v;
+                if (v > ctx->s32GlobalMaxAbs) {
+                    ctx->s32GlobalMaxAbs = v;
+                }
             }
 
+            // Choose normalization based on global maxAbs (stable across entire track).
             // S32LE can come in different effective scales:
             // - 16-bit scale: abs <= ~32768
             // - 24-bit scale: abs <= ~8388608 (2^23)
             // - Q31 scale:    abs up to ~2^31
-            if (maxAbs <= (1LL << 20)) {
+            if (ctx->s32GlobalMaxAbs <= (1LL << 20)) {
                 norm = 1.0f / 32768.0f;
-            } else if (maxAbs <= (1LL << 27)) {
+            } else if (ctx->s32GlobalMaxAbs <= (1LL << 27)) {
                 norm = 1.0f / 8388608.0f;
             } else {
                 norm = 1.0f / 2147483648.0f;
@@ -1050,17 +1057,10 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             }
         }
 
-        // Transparent peak limiter (block-based).
-        float peak = 0.0f;
+        // Per-sample soft clipper using tanh to avoid pumping artifacts.
+        // This provides smooth saturation instead of block-based gain reduction.
         for (size_t i = 0; i < sampleCount; i++) {
-            const float a = std::fabs(ctx->dspScratchF[i]);
-            if (a > peak) peak = a;
-        }
-        if (peak > 0.999f) {
-            const float g = 0.999f / peak;
-            for (size_t i = 0; i < sampleCount; i++) {
-                ctx->dspScratchF[i] *= g;
-            }
+            ctx->dspScratchF[i] = std::tanh(ctx->dspScratchF[i]);
         }
 
         if (bytesPerSample == 2) {

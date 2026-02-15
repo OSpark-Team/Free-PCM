@@ -168,6 +168,11 @@ struct PcmStreamDecoderContext {
     // Float DSP scratch (normalized)
     std::vector<float> dspScratchF;
 
+    // Global S32LE max absolute value for stable normalization.
+    // This persists across callbacks to prevent volume rollercoasters
+    // when the source data scale is ambiguous (16/24/32-bit).
+    int64_t s32GlobalMaxAbs;
+
     // 用于 PcmRingBuffer 重新初始化
     size_t ringBytes;
     int32_t actualSampleRate;
