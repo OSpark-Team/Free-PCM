@@ -1,4 +1,5 @@
 #include "napi_stream_decoder.h"
+#include <thread>
 
 #undef LOG_TAG
 #define LOG_TAG "NapiStreamDecoder"
@@ -590,6 +591,57 @@ napi_value PcmDecoderSetChannelVolumes(napi_env env, napi_callback_info info) {
 }
 
 // ============================================================================
+// Decoder Pause/Resume for network timeout prevention
+// ============================================================================
+
+napi_value PcmDecoderPause(napi_env env, napi_callback_info info) {
+    void *data = nullptr;
+    napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx) {
+        napi_throw_error(env, nullptr, "Failed to get decoder context");
+        return nullptr;
+    }
+
+    ctx->decoderPaused.store(true);
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderResume(napi_env env, napi_callback_info info) {
+    void *data = nullptr;
+    napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx) {
+        napi_throw_error(env, nullptr, "Failed to get decoder context");
+        return nullptr;
+    }
+
+    ctx->decoderPaused.store(false);
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderIsAlive(napi_env env, napi_callback_info info) {
+    void *data = nullptr;
+    napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx) {
+        napi_value result;
+        napi_get_boolean(env, false, &result);
+        return result;
+    }
+
+    napi_value result;
+    napi_get_boolean(env, ctx->decoderAlive.load(), &result);
+    return result;
+}
+
+// ============================================================================
 // Seek 功能实现
 // ============================================================================
 
@@ -744,6 +796,10 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
     ctx->success = false;
 
+    // Initialize decoder state
+    ctx->decoderPaused.store(false);
+    ctx->decoderAlive.store(true);
+
     // ensure meter starts fresh
     ctx->drcMeterLastEmitMs = 0;
 
@@ -887,6 +943,18 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
     };
 
     AudioDecoder::PcmDataCallback pcmCb = [ctx](const uint8_t *pcm, size_t size, int64_t /*ptsMs*/) {
+        // Check for pause state: wait until resumed instead of blocking on network.
+        // This prevents network timeout during long pauses.
+        // IMPORTANT: Also break out of pause if there's a pending seek request,
+        // otherwise seek will be blocked forever.
+        while (ctx->decoderPaused.load() && !ctx->cancel.load()) {
+            // Check if there's a pending seek - must process it immediately
+            if (ctx->seekSeq_.load() != ctx->seekHandledSeq_.load()) {
+                break;  // Exit pause to process seek
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
         if (ctx->cancel.load()) {
             return false;
         }
@@ -1142,6 +1210,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
                                         seekAppliedCb);
 
     ctx->success = ok;
+    ctx->decoderAlive.store(false);  // Mark decoder as no longer alive
     if (ctx->ring) {
         ctx->ring->MarkEos();
     }
@@ -1524,6 +1593,19 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     napi_value getPositionFn;
     napi_create_function(env, "getPosition", NAPI_AUTO_LENGTH, PcmDecoderGetPosition, ctx, &getPositionFn);
     napi_set_named_property(env, decoderObj, "getPosition", getPositionFn);
+
+    // Decoder pause/resume for network timeout prevention during long pauses
+    napi_value pauseDecoderFn;
+    napi_create_function(env, "pauseDecoder", NAPI_AUTO_LENGTH, PcmDecoderPause, ctx, &pauseDecoderFn);
+    napi_set_named_property(env, decoderObj, "pauseDecoder", pauseDecoderFn);
+
+    napi_value resumeDecoderFn;
+    napi_create_function(env, "resumeDecoder", NAPI_AUTO_LENGTH, PcmDecoderResume, ctx, &resumeDecoderFn);
+    napi_set_named_property(env, decoderObj, "resumeDecoder", resumeDecoderFn);
+
+    napi_value isAliveFn;
+    napi_create_function(env, "isAlive", NAPI_AUTO_LENGTH, PcmDecoderIsAlive, ctx, &isAliveFn);
+    napi_set_named_property(env, decoderObj, "isAlive", isAliveFn);
 
     // wrap finalizer
     napi_wrap(env, decoderObj, ctx, FinalizePcmStreamDecoder, nullptr, nullptr);

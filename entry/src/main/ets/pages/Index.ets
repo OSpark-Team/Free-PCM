@@ -134,7 +134,7 @@ struct Index {
   @State message: string = '音频实验室';
   @State status: string = '设备就绪';
   @State isDecoding: boolean = false;
-  @State isPlaying: boolean = false;
+  @State isPlaying: boolean = false; // 表示当前是否有声音正在输出
   @State url: string = '';
   @State currentIndex: number = 0;
 
@@ -199,7 +199,7 @@ struct Index {
   // --- 业务逻辑 ---
 
   private applyChannelVolumes() {
-    if (!this.isPlaying || !this.player.setChannelVolumes) return;
+    if (!this.player || !this.player.setChannelVolumes) return;
     try {
       this.player.setChannelVolumes(this.volLinearLeft, this.volLinearRight);
     } catch (e) {
@@ -216,7 +216,7 @@ struct Index {
   }
 
   private applyEqSettings() {
-    if (!this.isPlaying || !this.currentDecoder) return;
+    if (!this.currentDecoder) return;
     try {
       if (this.isStereoEqMode) {
         if (this.player.setEqGainsLR) {
@@ -232,7 +232,7 @@ struct Index {
   }
 
   private applyDrcSettings() {
-    if (!this.isPlaying || !this.currentDecoder) return;
+    if (!this.currentDecoder) return;
     try {
       if (this.currentDecoder.setDrcEnabled) {
         this.currentDecoder.setDrcEnabled(this.drcEnabled);
@@ -386,14 +386,14 @@ struct Index {
     return (1 - (db - minDb) / (0 - minDb)) * height;
   }
 
-  // --- 播放器逻辑 ---
+  // --- 播放器逻辑 (重构) ---
 
   private startBufferingWatchdog() {
     if (this.bufferingTimerId !== -1) return;
     this.lastPosMs = this.currentPosMs;
     this.lastPosUpdateTs = Date.now();
     this.bufferingTimerId = setInterval(() => {
-      if (this.isSeeking) { this.isBuffering = false; return; }
+      if (this.isSeeking || !this.isPlaying) { this.isBuffering = false; return; }
       const now = Date.now();
       if (this.currentPosMs !== this.lastPosMs) {
         this.lastPosMs = this.currentPosMs;
@@ -414,7 +414,7 @@ struct Index {
   }
 
   private async doSeek(targetMs: number) {
-    if (!this.player || !this.isPlaying || this.isSeeking) return;
+    if (!this.player || !this.currentDecoder || this.isSeeking) return;
     this.isSeeking = true;
     try {
       await this.player.seekTo(targetMs);
@@ -433,8 +433,41 @@ struct Index {
     return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   }
 
-  async playUrl() {
-    if (this.isDecoding || this.isPlaying) return;
+  // 核心逻辑：播放/暂停切换
+  async togglePlayState() {
+    // 1. 如果已经有解码器，处理 暂停/继续
+    if (this.currentDecoder) {
+      if (this.isPlaying) {
+        // 正在播放 -> 暂停
+        try {
+          await this.player.pause();
+          this.isPlaying = false;
+          this.status = '已暂停';
+          this.stopBufferingWatchdog();
+        } catch (e) {
+          console.error('Pause failed:', e);
+        }
+      } else {
+        // 暂停中 -> 继续播放
+        try {
+          await this.player.resume();
+          this.isPlaying = true;
+          this.status = '播放中';
+          this.startBufferingWatchdog();
+        } catch (e) {
+          console.error('Resume failed:', e);
+        }
+      }
+      return;
+    }
+
+    // 2. 如果没有解码器，开始新的播放
+    await this.startNewPlayback();
+  }
+
+  // 内部方法：初始化并开始新的播放
+  private async startNewPlayback() {
+    if (this.isDecoding) return;
     let targetUrl = this.url.trim();
     if (!targetUrl) { promptAction.showToast({ message: '请输入地址' }); return; }
 
@@ -451,18 +484,21 @@ struct Index {
     }
 
     this.isPlaying = true;
+    this.isDecoding = true;
     this.status = '正在初始化...';
     this.startBufferingWatchdog();
 
     try {
-      // 显式定义回调，确保类型安全
       const callbacks: PcmStreamDecoderCallbacks = {
         onProgress: (p: DecodeAudioProgress) => {
           if (p.progress >= 0) this.progressPercent = Math.min(100, Math.round(p.progress * 100));
         },
         onError: (e: Error) => {
-          this.status = `错误: ${e.message}`;
-          this.stopPlayback();
+          // 如果当前解码器还是这个 decoder，才报错 (防止 reset 后报错)
+          if (this.currentDecoder && this.status !== '已重置') {
+            this.status = `错误: ${e.message}`;
+            this.resetPlayback();
+          }
         },
         onDrcMeter: (m: DrcMeterInfo) => {
           this.meterLevel = m.levelDb;
@@ -483,33 +519,58 @@ struct Index {
       this.durationMs = info.durationMs ?? 0;
       this.status = `播放中: ${info.sampleRate}Hz`;
 
-      await this.player.play(decoder, info);
-      this.applyEqSettings();
-      this.applyChannelVolumes();
-      this.applyDrcSettings();
-
       this.player.setOnTimeUpdate((pos) => {
         if (!this.isDraggingSeek) this.currentPosMs = pos;
       });
 
+      // 初始化 EQ/DRC/音量
+      this.applyEqSettings();
+      this.applyChannelVolumes();
+      this.applyDrcSettings();
+
+      // 开始播放
+      // 注意：play() 返回 promise 表示“开始播放”成功，而非“播放结束”
+      await this.player.play(decoder, info);
+
+      // 使用 decoder.done 来等待播放/解码结束，这是你之前逻辑中有效的判断方式
       await decoder.done;
-      this.status = '播放结束';
+
+      // 播放正常结束
+      // 增加检查：确保当前没有被 Reset (currentDecoder 没有被置空或更换)
+      if (this.currentDecoder === decoder) {
+        this.status = '播放结束';
+        this.isPlaying = false;
+        this.currentPosMs = 0;
+        this.stopBufferingWatchdog();
+      }
+
     } catch (err) {
-      this.status = `异常: ${(err as BusinessError).message}`;
+      // 只有在没有手动 Reset 的情况下才报启动失败
+      if (this.currentDecoder) {
+        this.status = `启动失败: ${(err as BusinessError).message}`;
+        this.resetPlayback();
+      }
     } finally {
-      this.stopPlayback();
+      this.isDecoding = false;
     }
   }
 
-  private async stopPlayback() {
+  // 重置/停止逻辑：完全销毁
+  private async resetPlayback() {
     this.stopBufferingWatchdog();
-    await this.player.stop();
+    try {
+      await this.player.stop();
+    } catch (e) {
+      console.warn('Stop failed:', e);
+    }
+
     this.currentDecoder = null;
     this.isPlaying = false;
     this.isDecoding = false;
-    this.status = '已停止';
+    this.status = '已重置';
     this.currentPosMs = 0;
     this.progressPercent = 0;
+
     if (this.drcTimerId !== -1) {
       clearTimeout(this.drcTimerId);
       this.drcTimerId = -1;
@@ -532,13 +593,19 @@ struct Index {
           .caretColor(COLOR_ACCENT).margin({ bottom: 20 }).height(50).borderRadius(12)
           .shadow(ShadowStyle.OUTER_DEFAULT_XS).onChange((v) => this.url = v)
         Row({ space: 15 }) {
-          Button(this.isPlaying ? '播放中' : '开始播放')
+          // 按钮 1: 播放控制 (三态：开始 / 暂停 / 继续)
+          Button(this.getPlayButtonLabel())
             .layoutWeight(1).height(56).backgroundColor(this.isPlaying ? '#E3F2FF' : COLOR_ACCENT)
             .fontColor(this.isPlaying ? COLOR_ACCENT : Color.White).fontWeight(FontWeight.Bold)
-            .shadow(ShadowStyle.OUTER_DEFAULT_XS).onClick(() => this.playUrl()).enabled(!this.isPlaying)
-          Button('停止')
+            .shadow(ShadowStyle.OUTER_DEFAULT_XS)
+            .onClick(() => this.togglePlayState())
+            // .enabled(!this.isDecoding) // 初始化时禁用
+
+          // 按钮 2: 重置 (停止并销毁)
+          Button('重置')
             .width(100).height(56).backgroundColor('#FFF0F0').fontColor(COLOR_WARN)
-            .fontWeight(FontWeight.Bold).shadow(ShadowStyle.OUTER_DEFAULT_XS).onClick(() => this.stopPlayback())
+            .fontWeight(FontWeight.Bold).shadow(ShadowStyle.OUTER_DEFAULT_XS)
+            .onClick(() => this.resetPlayback())
         }.width('100%')
         Divider().color(COLOR_DIVIDER).margin({ top: 25, bottom: 25 })
         Column({ space: 12 }) {
@@ -556,6 +623,13 @@ struct Index {
         }.padding(20).backgroundColor(COLOR_CARD).borderRadius(16).shadow(ShadowStyle.OUTER_DEFAULT_XS)
       }.padding(24).width('100%').justifyContent(FlexAlign.Start).constraintSize({ minHeight: '100%' })
     }.scrollable(ScrollDirection.Vertical).scrollBar(BarState.Auto)
+  }
+
+  private getPlayButtonLabel(): string {
+    if (!this.currentDecoder) {
+      return '开始播放';
+    }
+    return this.isPlaying ? '暂停' : '继续播放';
   }
 
   @Builder

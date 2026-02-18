@@ -150,6 +150,23 @@ export interface PcmStreamDecoder {
    * @returns 当前位置（毫秒）
    */
   getPosition: () => number;
+
+  /**
+   * 暂停解码器（用于长时间暂停时防止网络超时）
+   * 当播放器暂停时调用此方法，解码线程会进入等待状态，不再读取网络数据
+   */
+  pauseDecoder?: () => void;
+
+  /**
+   * 恢复解码器（与 pauseDecoder 配对使用）
+   */
+  resumeDecoder?: () => void;
+
+  /**
+   * 检查解码器是否仍在运行
+   * @returns true 表示解码线程仍在运行，false 表示已退出
+   */
+  isAlive?: () => boolean;
 }
 
 /**

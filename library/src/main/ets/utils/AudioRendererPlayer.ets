@@ -223,9 +223,12 @@ export class AudioRendererPlayer {
 
     const wasPlaying = this.isPlaying_;
 
-    // 1. 暂停播放
+    // 1. 暂停 AudioRenderer（但不暂停解码器，因为 seek 需要解码线程运行）
     if (wasPlaying) {
-      await this.pause();
+      await this.renderer?.pause();
+      this.isPlaying_ = false;
+      this.stopTimeUpdate();
+      // Note: Don't call pauseDecoder() here - seek needs the decode thread to run!
     }
 
     // 2. 刷新 AudioRenderer 缓冲区
@@ -241,7 +244,13 @@ export class AudioRendererPlayer {
 
     // 4. 如果之前在播放，恢复播放
     if (wasPlaying) {
-      await this.resume();
+      // Resume decoder first (in case it was paused before seekTo was called)
+      if (this.decoder.resumeDecoder) {
+        this.decoder.resumeDecoder();
+      }
+      await this.renderer?.start();
+      this.isPlaying_ = true;
+      this.startTimeUpdate();
     }
   }
 
@@ -430,6 +439,7 @@ export class AudioRendererPlayer {
    * @remarks
    * - 暂停后可以通过 resume() 恢复播放
    * - 暂停不会释放资源，可以快速恢复
+   * - 同时通知解码器暂停，防止网络连接超时
    *
    * @throws
    * - AudioRenderer 未初始化
@@ -441,6 +451,11 @@ export class AudioRendererPlayer {
     await this.renderer.pause();
     this.isPlaying_ = false;
     this.stopTimeUpdate();
+
+    // Notify decoder to pause - prevents network timeout during long pauses
+    if (this.decoder?.pauseDecoder) {
+      this.decoder.pauseDecoder();
+    }
   }
 
   /**
@@ -451,14 +466,27 @@ export class AudioRendererPlayer {
    * @remarks
    * - 从暂停状态恢复播放
    * - 如果未暂停，此方法会启动播放
+   * - 会检查解码器是否仍在运行，如果已退出则抛出错误
    *
    * @throws
    * - AudioRenderer 未初始化
+   * - 解码器已退出（需要重新创建）
    */
   public async resume(): Promise<void> {
     if (!this.renderer) {
       throw new Error('AudioRenderer not initialized');
     }
+
+    // Check if decoder is still alive before resuming
+    if (this.decoder?.isAlive && !this.decoder.isAlive()) {
+      throw new Error('Decoder has stopped, need to recreate player');
+    }
+
+    // Notify decoder to resume
+    if (this.decoder?.resumeDecoder) {
+      this.decoder.resumeDecoder();
+    }
+
     await this.renderer.start();
     this.isPlaying_ = true;
     this.startTimeUpdate();

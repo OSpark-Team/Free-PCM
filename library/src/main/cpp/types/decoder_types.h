@@ -124,6 +124,14 @@ struct PcmStreamDecoderContext {
     bool success;
     bool readySettled;
 
+    // Decoder pause control: when true, decode thread waits instead of reading network.
+    // This prevents network timeout during long pauses.
+    std::atomic<bool> decoderPaused;
+
+    // Decoder alive status: set to true when decode thread starts, false when it exits.
+    // Used to detect if decoder has failed during long pause.
+    std::atomic<bool> decoderAlive;
+
     // 用于拒绝 done promise
     std::string lastErrStage;
     int32_t lastErrCode;
