@@ -44,7 +44,14 @@ export interface PcmStreamDecoderOptions {
   channelCount?: number;
   /** 目标比特率 */
   bitrate?: number;
-  /** 采样格式：1=S16LE, 3=S32LE，默认 S16LE */
+  /**
+   * 采样格式：
+   * - 0 或不指定：自动检测（推荐）。从源音频自动获取最佳格式，避免音质损失或资源浪费
+   * - 1：S16LE（16-bit 有符号整数，小端）
+   * - 3：S32LE（32-bit 有符号整数，小端，适用于 Hi-Res 音频）
+   *
+   * 注意：对于 WAV 文件，由于采用直通模式不进行转换，即使指定格式也会使用源文件格式
+   */
   sampleFormat?: number;
   /** 内部环形缓冲区大小 (Byte) */
   ringBytes?: number;

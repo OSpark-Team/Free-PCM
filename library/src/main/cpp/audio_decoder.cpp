@@ -168,6 +168,9 @@ bool AudioDecoder::Configure(int32_t sampleRate, int32_t channelCount, int32_t b
 
     // 输出采样格式：支持 S16LE (1) 和 S32LE (3)
     // 说明：此 key 的取值与 AudioSampleFormat 枚举一致
+    // sampleFormat = 0: auto (should not reach here, handled by caller)
+    // sampleFormat = 1: S16LE (default)
+    // sampleFormat = 3: S32LE (high resolution)
     int32_t finalSampleFormat = (sampleFormat == 3) ? 3 : 1;  // 3 = S32LE, 默认 1 = S16LE
     OH_AVFormat_SetIntValue(format_, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, finalSampleFormat);
     if (finalSampleFormat == 3) {
@@ -538,8 +541,12 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             OH_LOG_INFO(LOG_APP, "Passthrough audio/raw sampleFormat unknown, defaulting to S16LE");
         }
 
-        if (sampleFormat == 3 && finalSF != 3) {
-            OH_LOG_INFO(LOG_APP, "Passthrough audio/raw ignores requested sampleFormat=3; using source format=%{public}d", finalSF);
+        // For passthrough mode, user-specified sampleFormat is informational only.
+        // We must use the source format since no conversion is performed.
+        if (sampleFormat == 1 || sampleFormat == 3) {
+            if (sampleFormat != finalSF) {
+                OH_LOG_INFO(LOG_APP, "Passthrough mode: user requested sampleFormat=%{public}d but source is %{public}d (using source format, no conversion)", sampleFormat, finalSF);
+            }
         }
         
         if (infoCb) {
@@ -650,7 +657,25 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
     const int32_t finalSampleRate = (sampleRate > 0) ? sampleRate : ((detectedSampleRate_ > 0) ? detectedSampleRate_ : 44100);
     const int32_t finalChannelCount = (channelCount > 0) ? channelCount : ((detectedChannelCount_ > 0) ? detectedChannelCount_ : 2);
-    const int32_t finalSampleFormat = (sampleFormat == 3) ? 3 : 1; // Use passed sampleFormat: 3=S32LE, 1=S16LE
+
+    // sampleFormat logic:
+    // - If user specifies 1 (S16LE) or 3 (S32LE), use user's choice
+    // - If user specifies 0 or leaves default, auto-detect from source:
+    //   - Use detectedSampleFormat_ if valid (1 or 3)
+    //   - Otherwise default to S16LE (1)
+    int32_t finalSampleFormat = 1;  // Default S16LE
+    if (sampleFormat == 1 || sampleFormat == 3) {
+        // User explicitly specified format
+        finalSampleFormat = sampleFormat;
+        OH_LOG_INFO(LOG_APP, "Using user-specified sampleFormat: %{public}d", sampleFormat);
+    } else if (detectedSampleFormat_ == 1 || detectedSampleFormat_ == 3) {
+        // Auto-detect from source track
+        finalSampleFormat = detectedSampleFormat_;
+        OH_LOG_INFO(LOG_APP, "Auto-detected sampleFormat from source: %{public}d", detectedSampleFormat_);
+    } else {
+        // Fallback to S16LE
+        OH_LOG_INFO(LOG_APP, "Using default sampleFormat: 1 (S16LE)");
+    }
 
     // 配置解码参数
     if (!Configure(finalSampleRate, finalChannelCount, bitrate, finalSampleFormat)) {

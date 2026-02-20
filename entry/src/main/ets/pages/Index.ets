@@ -511,13 +511,12 @@ struct Index {
       const decoder = this.decoderTool.createStreamDecoder(targetUrl, {
         eqEnabled: true,
         eqGainsDb: [...this.eqGainsUnified],
-        sampleFormat: 3
       }, callbacks);
 
       this.currentDecoder = decoder;
       const info = await decoder.ready;
       this.durationMs = info.durationMs ?? 0;
-      this.status = `播放中: ${info.sampleRate}Hz`;
+      this.status = `播放中: ${info.sampleRate}Hz，${info.sampleFormatCode}`;
 
       this.player.setOnTimeUpdate((pos) => {
         if (!this.isDraggingSeek) this.currentPosMs = pos;

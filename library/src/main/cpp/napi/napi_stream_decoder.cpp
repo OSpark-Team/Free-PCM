@@ -1321,7 +1321,7 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     int32_t sampleRate = 0;
     int32_t channelCount = 0;
     int32_t bitrate = 0;
-    int32_t sampleFormat = 1; // Default to S16LE (1), S32LE = 3
+    int32_t sampleFormat = 0; // 0=auto (default), 1=S16LE, 3=S32LE
     // ringBytes:
     // - 0 means auto (adaptive by audio format + duration + source type)
     // - otherwise fixed ring buffer size
@@ -1347,10 +1347,15 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
                 napi_get_value_int32(env, v, &bitrate);
             }
             if (napi_get_named_property(env, args[1], "sampleFormat", &v) == napi_ok) {
-                int32_t sf = 1;
+                int32_t sf = 0;
                 if (napi_get_value_int32(env, v, &sf) == napi_ok) {
-                    // Validate: only 1 (S16LE) or 3 (S32LE) are supported
-                    sampleFormat = (sf == 3) ? 3 : 1;
+                    // Accept 0 (auto), 1 (S16LE), or 3 (S32LE)
+                    // Invalid values are treated as auto (0)
+                    if (sf == 0 || sf == 1 || sf == 3) {
+                        sampleFormat = sf;
+                    } else {
+                        sampleFormat = 0;  // Invalid value → auto
+                    }
                 }
             }
             if (napi_get_named_property(env, args[1], "ringBytes", &v) == napi_ok) {
