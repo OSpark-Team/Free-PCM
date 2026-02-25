@@ -46,15 +46,17 @@ ohpm install @ospark/free-pcm
 这是最简单的集成方式，自动处理了解码与 AudioKit 的对接。
 
 ```typescript
-import freePcm, { AudioRendererPlayer } from '@ospark/free-pcm';
+import { PcmDecoderTool, AudioRendererPlayer } from '@ospark/free-pcm';
 
-const player = new AudioRendererPlayer();
-const decoder = freePcm.createPcmStreamDecoder('/data/storage/el2/base/test.mp3');
+// 创建解码器
+const decoderTool = new PcmDecoderTool();
+const decoder = decoderTool.createStreamDecoder('/data/storage/el2/base/test.mp3');
 
 // 1. 等待元数据准备就绪
 const info = await decoder.ready;
 
-// 2. 开始播放
+// 2. 创建播放器并开始播放
+const player = new AudioRendererPlayer();
 await player.play(decoder, info);
 
 // 3. 播放控制
@@ -67,15 +69,18 @@ await player.resume();
 ### 2. 均衡器（EQ）调节
 
 ```typescript
-import { PcmEqualizer, EqPreset } from '@ospark/free-pcm';
+import { PcmEqualizer, EqPreset, PcmDecoderTool } from '@ospark/free-pcm';
 
+// 创建解码器和均衡器
+const decoderTool = new PcmDecoderTool();
+const decoder = decoderTool.createStreamDecoder('/path/to/audio.mp3');
 const equalizer = new PcmEqualizer();
 
 // 使用内置预设（推荐）
 equalizer.setGainsDb(EqPreset.Pop);
 
-// 应用到当前解码器
-decoder.setEqGains(equalizer.getGainsDb());
+// 应用到当前解码器（会自动启用 EQ）
+equalizer.applyToDecoder(decoder);
 
 ```
 
@@ -83,7 +88,14 @@ decoder.setEqGains(equalizer.getGainsDb());
 
 ## 📖 核心 API 概览
 
-### 解码器配置 `createPcmStreamDecoder`
+### 解码器配置 `createStreamDecoder`
+
+通过 `PcmDecoderTool` 创建解码器：
+
+```typescript
+const decoderTool = new PcmDecoderTool();
+const decoder = decoderTool.createStreamDecoder(inputPathOrUri, options, callbacks);
+```
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |

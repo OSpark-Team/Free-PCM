@@ -49,17 +49,18 @@ hvigorw library:assembleHar
 import { PcmDecoderTool, AudioRendererPlayer, PcmEqualizer, EqPreset } from '@ospark/free-pcm';
 
 async function startAudio() {
-  const decoderTool = PcmDecoderTool.getInstance();
+  // 1. 创建解码工具实例
+  const decoderTool = new PcmDecoderTool();
   
-  // 1. 初始化解码器（支持本地路径与网络 URL）
+  // 2. 初始化解码器（支持本地路径与网络 URL）
   const decoder = decoderTool.createStreamDecoder('https://example.com/music.mp3');
   const info = await decoder.ready; // 等待元数据就绪
 
-  // 2. 关联播放器并启动
+  // 3. 关联播放器并启动
   const player = new AudioRendererPlayer();
   await player.play(decoder, info);
 
-  // 3. 实时 EQ 调节
+  // 4. 实时 EQ 调节
   const equalizer = new PcmEqualizer();
   equalizer.setGainsDb(EqPreset.Rock);
   equalizer.applyToDecoder(decoder);
