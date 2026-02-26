@@ -16,6 +16,7 @@ import {
   MixerTab,
   EqualizerTab,
   DrcTab,
+  SpectrumBars,
   COLOR_BG,
   COLOR_ACCENT,
   COLOR_TEXT_SEC,
@@ -25,7 +26,8 @@ import {
   DrcPresetId,
   DRC_PRESET_LABEL,
   DRC_PRESET_MAP,
-  DrcMeterInfo
+  DrcMeterInfo,
+  FftSpectrumAnalyzer
 } from './components';
 
 @Entry
@@ -85,6 +87,31 @@ struct Index {
   @State meterLevel: number = -120;
   @State meterGain: number = 0;
   @State meterGr: number = 0;
+
+  // === 可视化（PCM Tap） ===
+  @State vizLevel01: number = 0;
+  @State vizBands01: number[] = new Array(16).fill(0);
+  @State vizPeaks01: number[] = new Array(16).fill(0);
+
+  private spectrum: FftSpectrumAnalyzer = new FftSpectrumAnalyzer({ fftSize: 1024, barCount: 16 });
+  private vizTimerId: number = -1;
+
+  private startVizTimer(): void {
+    if (this.vizTimerId !== -1) return;
+    this.vizTimerId = setInterval(() => {
+      this.spectrum.computeBars();
+      this.vizBands01 = this.spectrum.getBars01();
+      this.vizPeaks01 = this.spectrum.getPeaks01();
+      this.vizLevel01 = this.spectrum.getLevel01();
+    }, 33);
+  }
+
+  private stopVizTimer(): void {
+    if (this.vizTimerId !== -1) {
+      clearInterval(this.vizTimerId);
+      this.vizTimerId = -1;
+    }
+  }
 
   // === 生命周期 ===
   aboutToAppear(): void {
@@ -299,6 +326,14 @@ struct Index {
         if (!this.isDraggingSeek) this.currentPosMs = pos;
       });
 
+      // PCM tap: only push samples (keep it light; no FFT here)
+      this.player.setOnPcmData((pcmBuf, bytesWritten, streamInfo) => {
+        this.spectrum.setStreamFormat(streamInfo.sampleRate, streamInfo.sampleFormatCode, streamInfo.channelCount);
+        this.spectrum.pushPcm(pcmBuf, bytesWritten);
+      });
+
+      this.startVizTimer();
+
       this.applyEqSettings();
       this.applyChannelVolumes();
       this.applyDrcSettings();
@@ -310,6 +345,12 @@ struct Index {
         this.status = '播放结束';
         this.isPlaying = false;
         this.currentPosMs = 0;
+        this.vizLevel01 = 0;
+        this.vizBands01 = new Array(16).fill(0);
+        this.vizPeaks01 = new Array(16).fill(0);
+        this.spectrum.reset();
+        this.player.setOnPcmData(null);
+        this.stopVizTimer();
         this.stopBufferingWatchdog();
       }
 
@@ -347,6 +388,15 @@ struct Index {
     this.meterLevel = -120;
     this.meterGain = 0;
     this.meterGr = 0;
+    this.vizLevel01 = 0;
+    this.vizBands01 = new Array(16).fill(0);
+    this.vizPeaks01 = new Array(16).fill(0);
+    this.spectrum.reset();
+
+    // detach PCM tap
+    this.player.setOnPcmData(null);
+
+    this.stopVizTimer();
   }
 
   // === Tab 标题 ===
@@ -403,6 +453,11 @@ struct Index {
       .width('100%')
       .padding(24)
       .backgroundColor(COLOR_BG)
+
+      // 可视化区域（Canvas）
+      SpectrumBars({ bands01: this.vizBands01, peaks01: this.vizPeaks01, level01: this.vizLevel01, isPlaying: this.isPlaying, heightVp: 140 })
+        .width('100%')
+        .padding({ left: 24, right: 24, bottom: 12 })
 
       // Tabs 区域
       Tabs({ index: this.currentIndex }) {

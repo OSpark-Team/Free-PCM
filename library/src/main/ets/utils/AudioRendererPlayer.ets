@@ -44,6 +44,12 @@ import { BusinessError } from '@kit.BasicServicesKit';
 
 import type { PcmStreamDecoder, PcmStreamInfo } from './AudioDecoderManager';
 
+export type PcmDataCallback = (pcmBuffer: ArrayBuffer, bytesWritten: number, info: PcmStreamInfo) => void;
+
+interface PcmDataOptions {
+  minIntervalMs?: number;
+}
+
 export class AudioRendererPlayer {
   private renderer: audio.AudioRenderer | null = null;
   private decoder: PcmStreamDecoder | null = null;
@@ -53,6 +59,46 @@ export class AudioRendererPlayer {
   private timeUpdateTimerId: number = -1;
   private isPlaying_: boolean = false;
   private onTimeUpdateCallback: ((positionMs: number) => void) | null = null;
+
+  // PCM tap (visualization, metering, etc.)
+  private onPcmDataCallback: PcmDataCallback | null = null;
+  private pcmTapMinIntervalMs: number = 0;
+  private lastPcmTapTs: number = 0;
+
+  /**
+   * 设置 PCM 数据钩子（从 AudioRenderer 的 writeData 回调中同步触发）。
+   *
+   * @remarks
+   * - 回调在音频写入线程/回调中触发：必须足够轻量，严禁做重 IO/重计算。
+   * - pcmBuffer 可能会被系统复用；如需异步使用请自行复制。
+   * - bytesWritten 表示本次写入有效字节数（仅前 bytesWritten 字节有效）。
+   */
+  public setOnPcmData(callback: PcmDataCallback | null, options?: PcmDataOptions): void {
+    this.onPcmDataCallback = callback;
+    const minIntervalMs = options?.minIntervalMs ?? 0;
+    this.pcmTapMinIntervalMs = Number.isFinite(minIntervalMs) && minIntervalMs > 0 ? Math.floor(minIntervalMs) : 0;
+    this.lastPcmTapTs = 0;
+  }
+
+  private emitPcmTap(pcmBuffer: ArrayBuffer, bytesWritten: number): void {
+    const cb = this.onPcmDataCallback;
+    const info = this.streamInfo;
+    if (!cb || !info) return;
+
+    if (this.pcmTapMinIntervalMs > 0) {
+      const now = Date.now();
+      if ((now - this.lastPcmTapTs) < this.pcmTapMinIntervalMs) {
+        return;
+      }
+      this.lastPcmTapTs = now;
+    }
+
+    try {
+      cb(pcmBuffer, bytesWritten, info);
+    } catch (err) {
+      // Never let user callbacks break audio playback.
+    }
+  }
 
   /**
    * 映射采样率到系统枚举值
@@ -154,11 +200,16 @@ export class AudioRendererPlayer {
         // Preferred on API 12+: only consume ring when we can fully fill.
         if (d.fillForWriteData) {
           const n = d.fillForWriteData(buffer);
-          return n > 0 ? audio.AudioDataCallbackResult.VALID : audio.AudioDataCallbackResult.INVALID;
+          if (n > 0) {
+            this.emitPcmTap(buffer, n);
+            return audio.AudioDataCallbackResult.VALID;
+          }
+          return audio.AudioDataCallbackResult.INVALID;
         }
 
         // Fallback (legacy): consumes and pads with zeros, always treated as valid.
         d.fill(buffer);
+        this.emitPcmTap(buffer, buffer.byteLength);
         return audio.AudioDataCallbackResult.VALID;
       });
       await this.renderer.start();
