@@ -93,7 +93,23 @@ struct Index {
   @State vizBands01: number[] = new Array(16).fill(0);
   @State vizPeaks01: number[] = new Array(16).fill(0);
 
-  private spectrum: FftSpectrumAnalyzer = new FftSpectrumAnalyzer({ fftSize: 1024, barCount: 16 });
+  @State tiltEnabled: boolean = true;
+
+  private spectrum: FftSpectrumAnalyzer = new FftSpectrumAnalyzer({
+    fftSize: 1024,
+    barCount: 16,
+    // tuned for "meaty" bars
+    minRelDb: -60,
+    gamma: 0.55,
+    attack: 0.82,
+    release: 0.18,
+    peakHoldFrames: 12,
+    gravity: 0.025,
+
+    // tilt compensation: more modern/energetic look
+    tiltDbPerOct: 4.5,
+    tiltRefHz: 1000,
+  });
   private vizTimerId: number = -1;
 
   private startVizTimer(): void {
@@ -332,6 +348,9 @@ struct Index {
         this.spectrum.pushPcm(pcmBuf, bytesWritten);
       });
 
+      // apply current tilt setting
+      this.spectrum.setTilt(this.tiltEnabled, 4.5, 1000);
+
       this.startVizTimer();
 
       this.applyEqSettings();
@@ -455,9 +474,25 @@ struct Index {
       .backgroundColor(COLOR_BG)
 
       // 可视化区域（Canvas）
-      SpectrumBars({ bands01: this.vizBands01, peaks01: this.vizPeaks01, level01: this.vizLevel01, isPlaying: this.isPlaying, heightVp: 140 })
+      SpectrumBars({ bands01: this.vizBands01, peaks01: this.vizPeaks01, renderBarCount: 64, level01: this.vizLevel01, isPlaying: this.isPlaying, heightVp: 140 })
         .width('100%')
         .padding({ left: 24, right: 24, bottom: 12 })
+
+      // 可选：频谱倾斜补偿开关
+      Row() {
+        Text('Tilt 补偿 (+4.5dB/oct)')
+          .fontSize(14)
+          .fontColor(COLOR_TEXT_SEC)
+        Blank()
+        Toggle({ type: ToggleType.Switch, isOn: this.tiltEnabled })
+          .onChange((v) => {
+            this.tiltEnabled = v;
+            // safe to toggle at runtime; just recompute weights
+            this.spectrum.setTilt(this.tiltEnabled, 4.5, 1000);
+          })
+      }
+      .width('100%')
+      .padding({ left: 24, right: 24, bottom: 12 })
 
       // Tabs 区域
       Tabs({ index: this.currentIndex }) {

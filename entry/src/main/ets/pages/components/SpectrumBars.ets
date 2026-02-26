@@ -5,6 +5,8 @@ export interface SpectrumBarsProps {
   bands01: number[];
   /** 0~1 peak caps (optional) */
   peaks01?: number[];
+  /** target bar count for rendering (interpolate bands to this count) */
+  renderBarCount?: number;
   /** overall 0~1 (optional label) */
   level01?: number;
   isPlaying: boolean;
@@ -18,10 +20,16 @@ function clamp01(v: number): number {
   return v;
 }
 
+interface BindPeak {
+  bands: number[];
+  peaks: number[];
+}
+
 @Component
 export struct SpectrumBars {
   @Prop bands01: number[] = [];
   @Prop peaks01: number[] = [];
+  @Prop renderBarCount: number = 64;
   @Prop level01: number = 0;
   @Prop isPlaying: boolean = false;
   @Prop heightVp: number = 140;
@@ -31,6 +39,9 @@ export struct SpectrumBars {
 
   private drawTimerId: number = -1;
   private smoothBands: number[] = [];
+
+  private interpBands: number[] = [];
+  private interpPeaks: number[] = [];
 
   aboutToDisappear(): void {
     this.stop();
@@ -51,6 +62,71 @@ export struct SpectrumBars {
     }
   }
 
+  private hermite(p0: number, p1: number, p2: number, p3: number, t: number): number {
+    // Catmull-Rom as cubic Hermite (tension=0.5)
+    const m1 = 0.5 * (p2 - p0);
+    const m2 = 0.5 * (p3 - p1);
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    return h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2;
+  }
+
+  private sampleCubic(arr: number[], x: number): number {
+    const n = arr.length;
+    if (n === 0) return 0;
+    if (n === 1) return clamp01(arr[0]);
+    const i1 = Math.floor(x);
+    const t = x - i1;
+    const i0 = Math.max(0, i1 - 1);
+    const i2 = Math.min(n - 1, i1 + 1);
+    const i3 = Math.min(n - 1, i1 + 2);
+    const p0 = arr[i0];
+    const p1 = arr[Math.min(n - 1, i1)];
+    const p2 = arr[i2];
+    const p3 = arr[i3];
+    return clamp01(this.hermite(p0, p1, p2, p3, t));
+  }
+
+  private buildInterpolated(): BindPeak {
+    const src = this.bands01 ?? [];
+    const srcPeaks = this.peaks01 ?? [];
+    const srcN = src.length;
+    const dstN = Math.max(4, Math.min(256, Math.floor(this.renderBarCount ?? 64)));
+
+    if (this.interpBands.length !== dstN) this.interpBands = new Array(dstN).fill(0);
+    if (this.interpPeaks.length !== dstN) this.interpPeaks = new Array(dstN).fill(0);
+
+    if (srcN <= 1) {
+      const v = srcN === 1 ? clamp01(src[0]) : 0;
+      const p = srcPeaks.length === 1 ? clamp01(srcPeaks[0]) : -1;
+      for (let i = 0; i < dstN; i++) {
+        this.interpBands[i] = v;
+        this.interpPeaks[i] = p;
+      }
+      return { bands: this.interpBands, peaks: this.interpPeaks };
+    }
+
+    // map dst index to src index range [0, srcN-1]
+    const scale = (srcN - 1) / (dstN - 1);
+    for (let i = 0; i < dstN; i++) {
+      const x = i * scale;
+      this.interpBands[i] = this.sampleCubic(src, x);
+      // peaks: cubic too, but never below band
+      if (srcPeaks.length === srcN) {
+        const pk = this.sampleCubic(srcPeaks, x);
+        this.interpPeaks[i] = pk < this.interpBands[i] ? this.interpBands[i] : pk;
+      } else {
+        this.interpPeaks[i] = -1;
+      }
+    }
+
+    return { bands: this.interpBands, peaks: this.interpPeaks };
+  }
+
   private draw(): void {
     const ctx = this.canvasCtx;
     if (!ctx) return;
@@ -58,8 +134,9 @@ export struct SpectrumBars {
     const h = ctx.height;
     if (w <= 0 || h <= 0) return;
 
-    const bands = this.bands01 ?? [];
-    const peaks = this.peaks01 ?? [];
+    const built = this.buildInterpolated();
+    const bands = built.bands;
+    const peaks = built.peaks;
     const n = bands.length;
 
     // ensure smooth buffer
@@ -76,6 +153,15 @@ export struct SpectrumBars {
     const paddingY = 14;
     const innerW = Math.max(0, w - paddingX * 2);
     const innerH = Math.max(0, h - paddingY * 2);
+
+    // segmented background (low/mid/high)
+    const segW = innerW / 3;
+    ctx.fillStyle = '#121018';
+    ctx.fillRect(paddingX, paddingY, segW, innerH);
+    ctx.fillStyle = '#10161A';
+    ctx.fillRect(paddingX + segW, paddingY, segW, innerH);
+    ctx.fillStyle = '#121A10';
+    ctx.fillRect(paddingX + segW * 2, paddingY, segW, innerH);
 
     // subtle grid
     ctx.strokeStyle = '#222222';

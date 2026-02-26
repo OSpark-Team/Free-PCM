@@ -15,6 +15,18 @@ export interface FftSpectrumOptions {
   sampleRate?: number;    // default 48000 (will be set from streamInfo)
   sampleFormatCode?: number; // 1=S16LE, 3=S32LE
   channelCount?: number;  // default 2
+
+  // dynamics tuning
+  minRelDb?: number;      // default -55
+  gamma?: number;         // default 0.6
+  attack?: number;        // default 0.75
+  release?: number;       // default 0.25
+  peakHoldFrames?: number;// default 10
+  gravity?: number;       // default 0.03
+
+  // spectral tilt compensation
+  tiltDbPerOct?: number;  // default 0 (e.g. +4.5)
+  tiltRefHz?: number;     // default 1000
 }
 
 function clamp01(v: number): number {
@@ -93,15 +105,28 @@ export class FftSpectrumAnalyzer {
   private mag: Float32Array;
 
   // bars output + dynamics
-  private bars01: Float32Array;
-  private peaks01: Float32Array;
-  private peakHold: Float32Array;
+  private bars01: Float32Array;       // smoothed bar level 0..1
+  private peaks01: Float32Array;      // peak cap 0..1
+  private peakHold: Int16Array;       // frames remaining
+
+  private tmpDbWeighted: Float32Array; // per-bar weighted dB temp
 
   private level01: number = 0;
+
+  private minRelDb: number;
+  private gamma: number;
+  private attack: number;
+  private release: number;
+  private peakHoldFrames: number;
+  private gravity: number;
 
   // precomputed bin ranges for each bar
   private barBinStart: Int32Array;
   private barBinEnd: Int32Array;
+
+  private tiltDbPerOct: number;
+  private tiltRefHz: number;
+  private tiltDbByBar: Float32Array;
 
   constructor(options?: FftSpectrumOptions) {
     this.fftSize = Math.max(256, Math.min(4096, (options?.fftSize ?? 1024) | 0));
@@ -125,10 +150,23 @@ export class FftSpectrumAnalyzer {
 
     this.bars01 = new Float32Array(this.barCount);
     this.peaks01 = new Float32Array(this.barCount);
-    this.peakHold = new Float32Array(this.barCount);
+    this.peakHold = new Int16Array(this.barCount);
+    this.tmpDbWeighted = new Float32Array(this.barCount);
 
     this.barBinStart = new Int32Array(this.barCount);
     this.barBinEnd = new Int32Array(this.barCount);
+
+    this.tiltDbPerOct = Number.isFinite(options?.tiltDbPerOct) ? (options!.tiltDbPerOct as number) : 0;
+    this.tiltRefHz = Number.isFinite(options?.tiltRefHz) ? (options!.tiltRefHz as number) : 1000;
+    if (this.tiltRefHz <= 0) this.tiltRefHz = 1000;
+    this.tiltDbByBar = new Float32Array(this.barCount);
+
+    this.minRelDb = Number.isFinite(options?.minRelDb) ? (options!.minRelDb as number) : -55;
+    this.gamma = Number.isFinite(options?.gamma) ? (options!.gamma as number) : 0.6;
+    this.attack = Number.isFinite(options?.attack) ? (options!.attack as number) : 0.75;
+    this.release = Number.isFinite(options?.release) ? (options!.release as number) : 0.25;
+    this.peakHoldFrames = Number.isFinite(options?.peakHoldFrames) ? (options!.peakHoldFrames as number) : 10;
+    this.gravity = Number.isFinite(options?.gravity) ? (options!.gravity as number) : 0.03;
 
     this.recomputeBins();
   }
@@ -152,6 +190,27 @@ export class FftSpectrumAnalyzer {
     }
     this.sampleFormatCode = sampleFormatCode;
     this.channelCount = Math.max(1, Math.min(2, (channelCount | 0)));
+  }
+
+  /**
+   * Enable/disable spectral tilt compensation at runtime.
+   * @remarks
+   * - This only recomputes per-bar tilt weights; FFT buffers are unchanged.
+   */
+  public setTilt(enabled: boolean, tiltDbPerOct: number = 4.5, tiltRefHz: number = 1000): void {
+    if (!enabled) {
+      this.tiltDbPerOct = 0;
+      this.tiltRefHz = tiltRefHz > 0 ? tiltRefHz : 1000;
+      this.recomputeTilt();
+      return;
+    }
+    this.tiltDbPerOct = Number.isFinite(tiltDbPerOct) ? tiltDbPerOct : 4.5;
+    this.tiltRefHz = (Number.isFinite(tiltRefHz) && tiltRefHz > 0) ? tiltRefHz : 1000;
+    this.recomputeTilt();
+  }
+
+  public getTiltEnabled(): boolean {
+    return this.tiltDbPerOct !== 0;
   }
 
   /**
@@ -238,18 +297,12 @@ export class FftSpectrumAnalyzer {
 
     // bars: log bins with dB mapping
     // Use RELATIVE dB (per-frame) to avoid "everything pegged" on loud masters.
-    const minRelDb = -55; // dynamic range below the current frame peak
+    const minRelDb = this.minRelDb; // dynamic range below the current frame peak
     const maxRelDb = 0;
     const eps = 1e-12;
 
-    // Find peak power in this frame (ignore DC bin 0)
-    let framePeak = 0;
-    for (let i = 1; i < (this.fftSize >> 1); i++) {
-      const v = this.mag[i];
-      if (v > framePeak) framePeak = v;
-    }
-    if (framePeak < eps) framePeak = eps;
-    const framePeakDb = 10 * Math.log10(framePeak + eps);
+    // Compute per-frame peak on WEIGHTED bars (Approach A) so tilt is consistent with normalization.
+    let framePeakDbWeighted = -1e9;
 
     for (let b = 0; b < this.barCount; b++) {
       const s = this.barBinStart[b];
@@ -262,35 +315,48 @@ export class FftSpectrumAnalyzer {
       }
       const mean = cnt > 0 ? (sum / cnt) : 0;
       const db = 10 * Math.log10(mean + eps);
-      const relDb = db - framePeakDb;
+      const dbWeighted = db + this.tiltDbByBar[b];
+      if (dbWeighted > framePeakDbWeighted) framePeakDbWeighted = dbWeighted;
+
+      this.tmpDbWeighted[b] = dbWeighted;
+    }
+
+    if (!Number.isFinite(framePeakDbWeighted)) {
+      framePeakDbWeighted = -1e9;
+    }
+
+    // Second pass: map weighted dB -> 0~1 bars with dynamics
+    for (let b = 0; b < this.barCount; b++) {
+      const dbWeighted = this.tmpDbWeighted[b];
+      const relDb = dbWeighted - framePeakDbWeighted;
       const norm = (relDb - minRelDb) / (maxRelDb - minRelDb);
 
       // perceptual shaping (gamma) to keep mid-level motion visible
-      const gamma = 0.6;
-      const target = clamp01(Math.pow(clamp01(norm), gamma));
+      const target = clamp01(Math.pow(clamp01(norm), this.gamma));
 
-      // dynamics: attack/release
-      const cur = this.bars01[b];
-      const atk = 0.75;
-      const rel = 0.25;
-      const next = (target > cur) ? (cur + (target - cur) * atk) : (cur + (target - cur) * rel);
+      // dynamics: attack/release on bar level
+      const curBar = this.bars01[b];
+      const atk = this.attack;
+      const rel = this.release;
+      const next = (target > curBar) ? (curBar + (target - curBar) * atk) : (curBar + (target - curBar) * rel);
       this.bars01[b] = next;
 
-      // peak hold + gravity
+      // peak hold + gravity (cap)
       const pk = this.peaks01[b];
       if (next >= pk) {
         this.peaks01[b] = next;
-        this.peakHold[b] = 10; // frames to hold
+        this.peakHold[b] = this.peakHoldFrames;
       } else {
         const hold = this.peakHold[b];
         if (hold > 0) {
           this.peakHold[b] = hold - 1;
         } else {
           // gravity fall
-          const g = 0.03;
-          this.peaks01[b] = pk - g;
-          if (this.peaks01[b] < next) this.peaks01[b] = next;
-          if (this.peaks01[b] < 0) this.peaks01[b] = 0;
+          const g = this.gravity;
+          let cap = pk - g;
+          if (cap < next) cap = next;
+          if (cap < 0) cap = 0;
+          this.peaks01[b] = cap;
         }
       }
     }
@@ -340,6 +406,27 @@ export class FftSpectrumAnalyzer {
 
       this.barBinStart[b] = k0;
       this.barBinEnd[b] = k1;
+    }
+
+    this.recomputeTilt();
+  }
+
+  private recomputeTilt(): void {
+    // based on current bin ranges and sampleRate
+    const minHz = 60;
+    const maxHz = Math.min(16000, this.sampleRate / 2);
+    for (let b = 0; b < this.barCount; b++) {
+      const t0 = b / this.barCount;
+      const t1 = (b + 1) / this.barCount;
+      const f0 = minHz * Math.pow(maxHz / minHz, t0);
+      const f1 = minHz * Math.pow(maxHz / minHz, t1);
+      const fc = Math.sqrt(f0 * f1);
+      if (this.tiltDbPerOct !== 0) {
+        const oct = Math.log2(fc / this.tiltRefHz);
+        this.tiltDbByBar[b] = this.tiltDbPerOct * oct;
+      } else {
+        this.tiltDbByBar[b] = 0;
+      }
     }
   }
 }
