@@ -4,6 +4,15 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)
 
+## [1.0.3] - 2026-02-28
+
+### 新增
+
+* **PCM 解码数据回调**：为 AudioRendererPlayer 新增 PCM Tap 回调支持，可以用于音频分析等
+* **AudioRenderer 创建回调**：允许消费者注册一个在 AudioRenderer 创建时触发的回调，不影响正常播放流程。
+
+---
+
 ## [1.0.2] - 2026-02-12
 
 ### 新增
@@ -24,7 +33,7 @@
 
 * **完整 Seek 支持**：支持前向/回溯跳转，并新增 `seekToAsync()`（针对 URL 场景，等待 post-seek PCM 数据就绪后 resolve）。
 * **API 12+ 写入优化**：`writeData` 支持 `fillForWriteData()` 与 VALID/INVALID 拉取模式，数据不足时不再强制消耗 ring buffer。
-* **自适应 RingBytes**：当不传参数或值  时，系统根据采样率、声道、位宽及音源类型，自动在 64KB~512KB 范围内阶梯式选择最优缓冲区大小。
+* **自适应 RingBytes**：当不传参数或值时，系统根据采样率、声道、位宽及音源类型，自动在 64KB~512KB 范围内阶梯式选择最优缓冲区大小。
 
 ### 变更
 

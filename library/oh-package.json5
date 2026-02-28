@@ -5,6 +5,8 @@
   "main": "Index.ets",
   "author": "okysu",
   "license": "Apache-2.0",
+  "homepage": "https://www.ospark.tech/free-pcm",
+  "repository": "https://github.com/OSpark-Team/Free-PCM",
   "keywords": [
     "audio",
     "decoder",
