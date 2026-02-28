@@ -50,6 +50,10 @@ interface PcmDataOptions {
   minIntervalMs?: number;
 }
 
+interface AudioRendererCallbacks {
+  onCreated?: (renderer: audio.AudioRenderer) => void;
+}
+
 export class AudioRendererPlayer {
   private renderer: audio.AudioRenderer | null = null;
   private decoder: PcmStreamDecoder | null = null;
@@ -64,6 +68,18 @@ export class AudioRendererPlayer {
   private onPcmDataCallback: PcmDataCallback | null = null;
   private pcmTapMinIntervalMs: number = 0;
   private lastPcmTapTs: number = 0;
+
+  // 创建AudioRendererCallback
+  private onCreatedCallback: ((renderer: audio.AudioRenderer) => void) | null = null;
+
+  /**
+   * 设置 AudioRenderer 创建回调
+   *
+   * @param callback - 创建回调函数
+   */
+  public setOnCreated(callback: ((renderer: audio.AudioRenderer) => void) | null): void {
+    this.onCreatedCallback = callback;
+  }
 
   /**
    * 设置 PCM 数据钩子（从 AudioRenderer 的 writeData 回调中同步触发）。
@@ -189,6 +205,15 @@ export class AudioRendererPlayer {
 
     try {
       this.renderer = await audio.createAudioRenderer(audioRendererOptions);
+
+      // 触发创建回调
+      if (this.onCreatedCallback) {
+        try {
+          this.onCreatedCallback(this.renderer);
+        } catch (err) {
+          // Never let user callbacks break audio playback.
+        }
+      }
 
       // API 12+: writeData callback can return VALID/INVALID.
       this.renderer.on('writeData', (buffer: ArrayBuffer) => {

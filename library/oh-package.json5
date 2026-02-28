@@ -1,6 +1,6 @@
 {
   "name": "@ospark/free-pcm",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Free PCM 音频解码库 - 支持多种音频格式解码为 PCM，提供流式解码和 10 段均衡器功能",
   "main": "Index.ets",
   "author": "okysu",
