@@ -96,3 +96,6 @@
 > hvigor hvigor client: Starting hvigor daemon.
 > hvigor Hvigor Daemon started in 1.18 s
 > hvigor UP-TO-DATE :entry:default@PreBuild...  
+
+## MCP限制
+不要使用ask_ai工具，推荐使用find_docs和web进行搜索

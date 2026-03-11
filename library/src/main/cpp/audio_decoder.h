@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <vector>
 
 // 音频解码器缓冲区信号类
 class AudioDecoderSignal {
@@ -128,6 +129,9 @@ private:
     int32_t detectedSampleRate_;
     int32_t detectedChannelCount_;
     int32_t detectedSampleFormat_;
+
+    // Codec specific data (extradata/csd) for decoder initialization
+    std::vector<uint8_t> detectedCodecConfig_;
 
     int32_t lastProgressPercent_;
     int64_t lastProgressPtsMs_;

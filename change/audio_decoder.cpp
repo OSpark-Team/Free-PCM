@@ -3,7 +3,6 @@
 #include <chrono>
 #include <algorithm>
 #include <cstring>
-#include <thread>
 #include <unistd.h>
 
 #undef LOG_TAG
@@ -173,31 +172,12 @@ bool AudioDecoder::Configure(int32_t sampleRate, int32_t channelCount, int32_t b
     // sampleFormat = 1: S16LE (default)
     // sampleFormat = 3: S32LE (high resolution)
     // sampleFormat = 4: F32LE (32-bit float)
-    //
-    // Planar格式映射（FFmpeg AVSampleFormat）:
-    // sampleFormat = 6: S16P -> S16LE (1)
-    // sampleFormat = 7: S32P -> S32LE (3)
-    // sampleFormat = 8: FLTP -> F32LE (4) - ALAC常用
-    // sampleFormat = 9: DBLP -> F32LE (4) - Vorbis可能使用
     int32_t finalSampleFormat = 1;  // Default S16LE
-    
-    if (sampleFormat >= 1 && sampleFormat <= 4) {
-        // Interleaved formats: 直接使用
-        finalSampleFormat = sampleFormat;
-    } else if (sampleFormat == 6) {
-        // S16P (planar signed 16-bit) -> S16LE
-        finalSampleFormat = 1;
-        OH_LOG_INFO(LOG_APP, "Mapping planar S16P to interleaved S16LE");
-    } else if (sampleFormat == 7) {
-        // S32P (planar signed 32-bit) -> S32LE
-        finalSampleFormat = 3;
-        OH_LOG_INFO(LOG_APP, "Mapping planar S32P to interleaved S32LE");
-    } else if (sampleFormat == 8 || sampleFormat == 9) {
-        // FLTP (planar float) or DBLP (planar double) -> F32LE
-        finalSampleFormat = 4;
-        OH_LOG_INFO(LOG_APP, "Mapping planar format %{public}d to interleaved F32LE", sampleFormat);
+    if (sampleFormat == 4) {
+        finalSampleFormat = 4;  // F32LE
+    } else if (sampleFormat == 3) {
+        finalSampleFormat = 3;  // S32LE
     }
-    
     OH_AVFormat_SetIntValue(format_, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, finalSampleFormat);
     if (finalSampleFormat == 4) {
         OH_LOG_INFO(LOG_APP, "Set output sample format: F32LE");
@@ -207,7 +187,6 @@ bool AudioDecoder::Configure(int32_t sampleRate, int32_t channelCount, int32_t b
         OH_LOG_INFO(LOG_APP, "Set output sample format: S16LE");
     }
 
-    // 设置Codec Specific Data (extradata/csd) - 某些解码器（如ALAC、Vorbis）需要
     if (!detectedCodecConfig_.empty()) {
         OH_AVFormat_SetBuffer(format_, OH_MD_KEY_CODEC_CONFIG,
             detectedCodecConfig_.data(), detectedCodecConfig_.size());
@@ -296,8 +275,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                                      CancelFlag* cancelFlag,
                                      int32_t sampleFormat,
                                      const SeekPollCallback& seekPollCb,
-                                     const SeekAppliedCallback& seekAppliedCb,
-                                     const EosCallback& eosCb)
+                                     const SeekAppliedCallback& seekAppliedCb)
 {
     // 使用 RAII 机制自动清理 cancelFlag 指针
     struct CancelGuard {
@@ -315,6 +293,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
     detectedCodecConfig_.clear();
     lastProgressPercent_ = -1;
     lastProgressPtsMs_ = -1;
+
     // 触发初始进度回调
     if (progressCb) {
         progressCb(0.0, 0, 0);
@@ -452,9 +431,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             // For audio/raw (WAV passthrough), this usually tells the PCM sample width.
             // 1=S16LE, 3=S32LE.
             OH_AVFormat_GetIntValue(trackFormat, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, &detectedSampleFormat_);
-            
-            // Extract codec config (extradata/csd) for decoder initialization
-            // Required for ALAC, Vorbis, AAC, etc.
+
             uint8_t* codecConfig = nullptr;
             size_t codecConfigSize = 0;
             if (OH_AVFormat_GetBuffer(trackFormat, OH_MD_KEY_CODEC_CONFIG, &codecConfig, &codecConfigSize) &&
@@ -467,7 +444,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                 detectedCodecConfig_.clear();
                 OH_LOG_INFO(LOG_APP, "Track %{public}u MIME %{public}s has no codec config", i, codecMime);
             }
-        }  // end of if (codecMime && strstr(codecMime, "audio"))
+        }
 
         OH_AVFormat_Destroy(trackFormat);
 
@@ -569,36 +546,6 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         }
     };
 
-    constexpr auto kTailSeekWindow = std::chrono::milliseconds(2500);
-    auto waitForTailSeekWindow = [&](bool codecRunning) {
-        if (eosCb) {
-            eosCb();
-        }
-
-        const auto deadline = std::chrono::steady_clock::now() + kTailSeekWindow;
-        while (true) {
-            if (cancelFlag_ && cancelFlag_->load()) {
-                OH_LOG_INFO(LOG_APP, "Decode canceled during EOS tail window");
-                return true;
-            }
-
-            if (seekPollCb) {
-                int64_t targetMs = 0;
-                uint64_t seq = 0;
-                if (seekPollCb(targetMs, seq)) {
-                    applySeek(targetMs, seq, codecRunning);
-                    return false;
-                }
-            }
-
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return true;
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-    };
-
     // 针对 audio/raw 格式（如 WAV）启用直通模式，绕过硬件解码器
     if (audioCodecMime == "audio/raw") {
         OH_LOG_INFO(LOG_APP, "MIME type is audio/raw, entering passthrough mode");
@@ -675,11 +622,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             int32_t ret = OH_AVDemuxer_ReadSampleBuffer(demuxer, audioTrackIndex, buffer);
             if (ret != AV_ERR_OK) {
                 OH_LOG_INFO(LOG_APP, "Raw read finished: %{public}d", ret);
-                if (waitForTailSeekWindow(/*codecRunning*/ false)) {
-                    break;
-                }
-                consecutiveNoDataCount = 0;
-                continue;
+                break; 
             }
 
             OH_AVCodecBufferAttr attr;
@@ -733,12 +676,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
             if (attr.flags & AVCODEC_BUFFER_FLAGS_EOS) {
                 OH_LOG_INFO(LOG_APP, "Raw read EOS");
-                ok = true;
-                if (waitForTailSeekWindow(/*codecRunning*/ false)) {
-                    break;
-                }
-                consecutiveNoDataCount = 0;
-                continue;
+                break;
             }
         }
 
@@ -846,11 +784,7 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         });
         if (outRes == StepResult::Eos) {
             ok = true;
-            if (waitForTailSeekWindow(/*codecRunning*/ true)) {
-                break;
-            }
-            inputEos = false;
-            continue;
+            break;
         }
         if (outRes == StepResult::Error) {
             // 如果上层回调返回 false，视为正常取消
@@ -880,6 +814,7 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
     detectedCodecConfig_.clear();
     lastProgressPercent_ = -1;
     lastProgressPtsMs_ = -1;
+
     if (progressCb) {
         progressCb(0.0, 0, 0);
     }
@@ -1011,7 +946,6 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
             OH_AVFormat_GetIntValue(trackFormat, OH_MD_KEY_AUD_CHANNEL_COUNT, &detectedChannelCount_);
             OH_AVFormat_GetIntValue(trackFormat, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, &detectedSampleFormat_);
 
-            // Extract codec config (extradata/csd) for decoder initialization
             uint8_t* codecConfig = nullptr;
             size_t codecConfigSize = 0;
             if (OH_AVFormat_GetBuffer(trackFormat, OH_MD_KEY_CODEC_CONFIG, &codecConfig, &codecConfigSize) &&
@@ -1028,7 +962,7 @@ bool AudioDecoder::DecodeFileInternal(const std::string& inputPathOrUri, const s
             OH_LOG_INFO(LOG_APP, "Found audio track %{public}d, MIME: %{public}s", i, codecMime);
             OH_LOG_INFO(LOG_APP, "Detected audio params: %{public}d Hz, %{public}d channels",
                         detectedSampleRate_, detectedChannelCount_);
-        }  // end of if (codecMime && strstr(codecMime, "audio"))
+        }
 
         OH_AVFormat_Destroy(trackFormat);
 
