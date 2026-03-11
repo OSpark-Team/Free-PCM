@@ -351,7 +351,17 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info) {
 // For AudioRenderer.on('writeData') (API 12+):
 // - return 0 when not enough data, so caller can return INVALID without consuming the ring
 // - return full buffer length when enough data, or when EOS is marked (with padding)
-// - Uses ReadBlocking with timeout to reduce high-frequency INVALID returns
+// - Uses ReadBlocking with adaptive timeout to reduce high-frequency INVALID returns
+//
+// Low-power renderer behavior (per HarmonyOS docs):
+// - System cache: 1000ms (screen on) / 10000ms (screen off)
+// - Request frequency: ~1ms per request to fill cache
+// - If app can't provide data fast enough, degrades to normal renderer
+//
+// Our strategy:
+// - When data is almost ready (>75% of requested): wait longer (up to 50ms)
+// - When data is scarce (<25%): wait shorter (10ms) to allow system to retry
+// - This balances between: filling system cache AND avoiding audio underrun
 napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
@@ -417,12 +427,34 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
         return zero;
     }
 
-    // Slow path: wait for data with timeout
-    // This reduces high-frequency INVALID returns and CPU usage
-    // Timeout: 30ms is a balance between latency and avoiding audio underrun
-    // At 48kHz stereo S16LE: 30ms = ~5760 bytes, which is typically <= AudioRenderer buffer
-    constexpr int kWaitTimeoutMs = 30;
-    const size_t n = ctx->ring->ReadBlocking(reinterpret_cast<uint8_t *>(buf), len, kWaitTimeoutMs);
+    // Adaptive wait strategy based on data availability
+    // Rationale: if we have significant data already, wait longer for the rest
+    //            if we have very little data, wait shorter to allow system retry
+    int waitTimeoutMs;
+    if (avail == 0) {
+        // No data at all - short wait, let system retry quickly
+        // This avoids blocking too long when decoder is slow
+        waitTimeoutMs = 10;
+    } else {
+        // Calculate how much of the requested data we have
+        const double fillRatio = static_cast<double>(avail) / static_cast<double>(len);
+        
+        if (fillRatio >= 0.75) {
+            // Almost there - wait longer to complete
+            waitTimeoutMs = 50;
+        } else if (fillRatio >= 0.5) {
+            // Halfway - moderate wait
+            waitTimeoutMs = 30;
+        } else if (fillRatio >= 0.25) {
+            // Some data - short wait
+            waitTimeoutMs = 20;
+        } else {
+            // Very little - shortest wait
+            waitTimeoutMs = 10;
+        }
+    }
+
+    const size_t n = ctx->ring->ReadBlocking(reinterpret_cast<uint8_t *>(buf), len, waitTimeoutMs);
     
     if (n >= len) {
         napi_value out;
@@ -431,7 +463,6 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
     }
     
     // Timeout or partial read - return 0 to signal INVALID
-    // Note: ReadBlocking already returns 0 on timeout, partial data is not returned
     napi_value zero;
     napi_create_int32(env, 0, &zero);
     return zero;

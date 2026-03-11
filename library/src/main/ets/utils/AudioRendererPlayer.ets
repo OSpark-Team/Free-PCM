@@ -349,14 +349,14 @@ export class AudioRendererPlayer {
    * 启用或禁用时间更新事件
    *
    * @param enabled - 是否启用时间更新
-   * @param intervalMs - 更新间隔（毫秒），默认 100ms
+   * @param intervalMs - 更新间隔（毫秒），默认 250ms
    *
    * @remarks
    * - 默认启用，播放时自动触发
-   * - intervalMs 建议：50ms~200ms
+   * - intervalMs 建议：200ms~500ms（华为文档建议 > 200ms 以免影响系统性能）
    * - 设置为 false 会停止时间更新
    */
-  public setTimeUpdateEnabled(enabled: boolean, intervalMs: number = 100): void {
+  public setTimeUpdateEnabled(enabled: boolean, intervalMs: number = 250): void {
     if (enabled && this.isPlaying_) {
       this.startTimeUpdate(intervalMs);
     } else {
@@ -367,10 +367,10 @@ export class AudioRendererPlayer {
   /**
    * 启动时间更新定时器
    *
-   * @param intervalMs - 更新间隔（毫秒），默认 100ms
+   * @param intervalMs - 更新间隔（毫秒），默认 250ms
    * @private
    */
-  private startTimeUpdate(intervalMs: number = 100): void {
+  private startTimeUpdate(intervalMs: number = 250): void {
     this.stopTimeUpdate();
     this.timeUpdateTimerId = setInterval(() => {
       if (this.decoder && this.onTimeUpdateCallback) {
