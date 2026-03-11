@@ -27,6 +27,15 @@ void PcmRingBuffer::MarkEos()
     notEmpty_.notify_all();
 }
 
+void PcmRingBuffer::ResetEos()
+{
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        eos_ = false;
+    }
+    notEmpty_.notify_all();
+}
+
 bool PcmRingBuffer::IsEos() const
 {
     std::lock_guard<std::mutex> lock(mu_);

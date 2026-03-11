@@ -8,6 +8,97 @@
 
 namespace napi_stream_decoder {
 
+namespace {
+
+constexpr size_t kAdaptiveRingAlignStep = 64 * 1024;
+
+bool IsHttpSource(const std::string& inputPathOrUri)
+{
+    return (inputPathOrUri.rfind("http://", 0) == 0) || (inputPathOrUri.rfind("https://", 0) == 0);
+}
+
+int32_t GetPcmBytesPerSample(int32_t sampleFormat)
+{
+    switch (sampleFormat) {
+        case 4:
+        case 3:
+            return 4;
+        case 2:
+            return 3;
+        case 1:
+        default:
+            return 2;
+    }
+}
+
+size_t AlignUpRingBytes(size_t value)
+{
+    return ((value + kAdaptiveRingAlignStep - 1) / kAdaptiveRingAlignStep) * kAdaptiveRingAlignStep;
+}
+
+size_t ComputeAdaptiveRingBytes(const PcmStreamDecoderContext* ctx,
+                               int32_t sampleRate,
+                               int32_t channelCount,
+                               int32_t actualSampleFormat,
+                               int64_t durationMs)
+{
+    const bool isHttp = IsHttpSource(ctx->inputPathOrUri);
+    const int32_t bytesPerSample = GetPcmBytesPerSample(actualSampleFormat);
+    const uint64_t pcmBytesPerSecond =
+        (sampleRate > 0 && channelCount > 0)
+            ? static_cast<uint64_t>(sampleRate) * static_cast<uint64_t>(channelCount) *
+                  static_cast<uint64_t>(bytesPerSample)
+            : 0;
+    const uint64_t encodedBytesPerSecond = (ctx->bitrate > 0) ? ((static_cast<uint64_t>(ctx->bitrate) + 7ULL) / 8ULL) : 0;
+
+    double targetSec = 1.35;
+    if (durationMs > 0) {
+        if (durationMs < 30 * 1000) {
+            targetSec = 1.25;
+        } else if (durationMs >= 10 * 60 * 1000) {
+            targetSec = 1.50;
+        } else {
+            targetSec = 1.35;
+        }
+    } else {
+        targetSec = 1.50;
+    }
+
+    size_t minLimit = isHttp ? (192 * 1024) : (256 * 1024);
+    if (pcmBytesPerSecond >= 1024ULL * 1024ULL) {
+        minLimit = isHttp ? (256 * 1024) : (512 * 1024);
+    }
+
+    size_t maxLimit = isHttp ? (8 * 1024 * 1024) : (16 * 1024 * 1024);
+
+    uint64_t desired = 0;
+    if (pcmBytesPerSecond > 0) {
+        desired = static_cast<uint64_t>(static_cast<double>(pcmBytesPerSecond) * targetSec);
+    } else if (encodedBytesPerSecond > 0) {
+        const double encodedTargetSec = isHttp ? 1.50 : 1.35;
+        desired = static_cast<uint64_t>(static_cast<double>(encodedBytesPerSecond) * encodedTargetSec);
+    }
+
+    size_t ringBytes = (desired > 0) ? static_cast<size_t>(desired) : minLimit;
+    if (ringBytes < minLimit) {
+        ringBytes = minLimit;
+    }
+    if (ringBytes > maxLimit) {
+        ringBytes = maxLimit;
+    }
+
+    ringBytes = AlignUpRingBytes(ringBytes);
+    if (ringBytes < minLimit) {
+        ringBytes = minLimit;
+    }
+    if (ringBytes > maxLimit) {
+        ringBytes = maxLimit;
+    }
+    return ringBytes;
+}
+
+} // namespace
+
 // ============================================================================
 // 流式解码器事件回调
 // ============================================================================
@@ -696,6 +787,7 @@ napi_value PcmDecoderSeekTo(napi_env env, napi_callback_info info) {
     }
 
     if (ctx->ring) {
+        ctx->ring->ResetEos();
         ctx->ring->Clear();
     }
 
@@ -762,6 +854,7 @@ napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info) {
     ctx->seekAwaitOutput.store(true);
 
     if (ctx->ring) {
+        ctx->ring->ResetEos();
         ctx->ring->Clear();
     }
 
@@ -839,71 +932,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
         size_t rb = ctx->ringBytes;
         if (rb == 0) {
-            // --- 动态常数定义 ---
-            constexpr size_t kStep = 64 * 1024;      // 64KB 步进对齐
-            constexpr size_t kMinLimit = 128 * 1024; // 最小提升到 128KB，确保 Hi-Res 基础缓冲
-            size_t kMaxLimit = 1024 * 1024;          // 默认最大 1MB
-
-            const bool isHttp =
-                (ctx->inputPathOrUri.rfind("http://", 0) == 0) || (ctx->inputPathOrUri.rfind("https://", 0) == 0);
-
-            // 精确计算每秒字节数 (BPS)
-            const int32_t bytesPerSample = (sf >= 3 || sf == 2) ? 4 : 2;
-            const uint64_t bytesPerSecond = (sr > 0 && cc > 0) ? static_cast<uint64_t>(sr) * static_cast<uint64_t>(cc) *
-                                                                     static_cast<uint64_t>(bytesPerSample)
-                                                               : 0;
-
-            // 针对高采样率 (如 192k) 自动提升上限
-            // 如果是 192k/24bit，BPS 超过 1MB/s，我们将上限放宽到 2MB 或 4MB
-            if (bytesPerSecond > 1000000) {
-                kMaxLimit = 2 * 1024 * 1024;
-            }
-
-            // 动态计算目标时长 (targetSec)
-            double targetSec = 0.0;
-            if (durMs > 0) {
-                // 本地长音频或普通曲目
-                if (durMs < 30 * 1000) {
-                    targetSec = 0.30; // 短音频保持灵敏度
-                } else if (durMs < 10 * 60 * 1000) {
-                    targetSec = 0.60; // 常规曲目平衡点
-                } else {
-                    targetSec = 0.80; // 长音频侧重稳定
-                }
-            } else {
-                // 网络直播流或未知长度
-                targetSec = isHttp ? 1.20 : 0.60;
-            }
-
-            // 环境补偿
-            if (isHttp) {
-                targetSec += 0.30; // 网络环境下增加 300ms 冗余
-            }
-
-            // 计算期望字节数
-            uint64_t desired = 0;
-            if (bytesPerSecond > 0 && targetSec > 0.0) {
-                desired = static_cast<uint64_t>(static_cast<double>(bytesPerSecond) * targetSec);
-            }
-
-            // 边界处理与阶梯化对齐
-            rb = static_cast<size_t>(desired);
-
-            // 确保不低于最小值，不超过当前规格下的最大值
-            if (rb < kMinLimit)
-                rb = kMinLimit;
-            if (rb > kMaxLimit)
-                rb = kMaxLimit;
-
-            // 向上取整到 kStep 的倍数 (对 CPU/内存总线更友好)
-            rb = ((rb + kStep - 1) / kStep) * kStep;
-
-            // 再次约束边界
-            if (rb < kMinLimit)
-                rb = kMinLimit;
-            if (rb > kMaxLimit)
-                rb = kMaxLimit;
-
+            rb = ComputeAdaptiveRingBytes(ctx, sr, cc, ctx->actualSampleFormat, durMs);
             ctx->ringBytes = rb;
         }
 
@@ -928,7 +957,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
         // 在发送 Ready 事件之后，再分配环形缓冲区
         // 这个操作在工作线程中进行，不会阻塞主线程
-        const int32_t bytesPerSample = (ctx->actualSampleFormat == 3) ? 4 : 2;
+        const int32_t bytesPerSample = GetPcmBytesPerSample(ctx->actualSampleFormat);
         ctx->ring = std::make_unique<audio::PcmRingBuffer>(rb,
                                                            sr,            // sampleRate
                                                            cc,            // channels
@@ -1040,15 +1069,11 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
-        const bool needChanVol = (ch == 1 && volL1000 != 1000) ||
-                                 (ch == 2 && (volL1000 != 1000 || volR1000 != 1000));
+        const bool chanVolSupported = (ch == 1 || ch == 2);
+        const bool needChanVol = chanVolSupported &&
+                                 ((ch == 1 && volL1000 != 1000) || (ch == 2 && (volL1000 != 1000 || volR1000 != 1000)));
 
         if (!needEq && !needChanVol && !needDrc) {
-            return ctx->ring->Push(pcm, size, &ctx->cancel);
-        }
-
-        if (ch != 1 && ch != 2) {
-            // Only stereo/mono are supported for per-ear compensation.
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
@@ -1275,6 +1300,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         }
 
         // Reset ring buffer to align position with target time.
+        ctx->ring->ResetEos();
         ctx->ring->Clear();
         ctx->ring->SetPositionMs(targetMs < 0 ? 0 : static_cast<uint64_t>(targetMs));
 
@@ -1282,9 +1308,15 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         ctx->seekAwaitSeq.store(seq);
     };
 
+    AudioDecoder::EosCallback eosCb = [ctx]() {
+        if (ctx->ring) {
+            ctx->ring->MarkEos();
+        }
+    };
+
     bool ok = decoder.DecodeToPcmStream(ctx->inputPathOrUri, ctx->sampleRate, ctx->channelCount, ctx->bitrate, infoCb,
                                         progressCb, pcmCb, errorCb, &ctx->cancel, ctx->sampleFormat, seekPollCb,
-                                        seekAppliedCb);
+                                        seekAppliedCb, eosCb);
 
     ctx->success = ok;
     ctx->decoderAlive.store(false);  // Mark decoder as no longer alive

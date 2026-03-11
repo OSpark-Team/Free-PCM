@@ -49,6 +49,7 @@ public:
     // - appliedCb: called after the seek attempt is applied (success or failure).
     using SeekPollCallback = std::function<bool(int64_t& targetMs, uint64_t& seq)>;
     using SeekAppliedCallback = std::function<void(uint64_t seq, bool success, int64_t targetMs)>;
+    using EosCallback = std::function<void()>;
 
     AudioDecoder();
     ~AudioDecoder();
@@ -81,7 +82,8 @@ public:
                            CancelFlag* cancelFlag,
                            int32_t sampleFormat = 1,
                            const SeekPollCallback& seekPollCb = SeekPollCallback(),
-                           const SeekAppliedCallback& seekAppliedCb = SeekAppliedCallback());
+                           const SeekAppliedCallback& seekAppliedCb = SeekAppliedCallback(),
+                           const EosCallback& eosCb = EosCallback());
 
     // 停止解码
     bool Stop();

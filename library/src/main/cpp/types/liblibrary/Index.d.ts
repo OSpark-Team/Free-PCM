@@ -62,7 +62,7 @@ export type PcmStreamDecoderOptions = {
   /**
    * 可选：声道数
    * - 0 或不传表示自动从媒体流获取
-   * - 1 = 单声道，2 = 立体声
+   * - 流式 PCM 解码支持 1 ~ 8 声道
    */
   channelCount?: number;
 
@@ -84,7 +84,9 @@ export type PcmStreamDecoderOptions = {
   /**
    * 内部 PCM 环形缓冲区大小（字节）
    * - 可选；不传或 <= 0 时启用自适应模型
-   * - 自适应范围：64KB ~ 512KB（按 64KB 阶梯），会根据采样率/声道/采样位宽/时长/是否为URL做选择
+   * - 典型自适应范围约 192KB ~ 16MB（按 64KB 阶梯）
+   * - 默认按目标缓冲时长估算，已知时长时通常约为 1.25s ~ 1.5s 的 PCM 数据量
+   * - 本地文件与 HTTP 来源仅做最小/最大边界保护，不再因高规格而大幅拉长缓冲时间
    * - 增大此值可减少播放卡顿，但会让 EQ 调整生效更慢（因为旧 PCM 在缓冲区里）
    */
   ringBytes?: number;

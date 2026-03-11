@@ -3,6 +3,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cstring>
+#include <thread>
 #include <unistd.h>
 
 #undef LOG_TAG
@@ -265,7 +266,8 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
                                      CancelFlag* cancelFlag,
                                      int32_t sampleFormat,
                                      const SeekPollCallback& seekPollCb,
-                                     const SeekAppliedCallback& seekAppliedCb)
+                                     const SeekAppliedCallback& seekAppliedCb,
+                                     const EosCallback& eosCb)
 {
     // 使用 RAII 机制自动清理 cancelFlag 指针
     struct CancelGuard {
@@ -521,6 +523,36 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         }
     };
 
+    constexpr auto kTailSeekWindow = std::chrono::milliseconds(2500);
+    auto waitForTailSeekWindow = [&](bool codecRunning) {
+        if (eosCb) {
+            eosCb();
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + kTailSeekWindow;
+        while (true) {
+            if (cancelFlag_ && cancelFlag_->load()) {
+                OH_LOG_INFO(LOG_APP, "Decode canceled during EOS tail window");
+                return true;
+            }
+
+            if (seekPollCb) {
+                int64_t targetMs = 0;
+                uint64_t seq = 0;
+                if (seekPollCb(targetMs, seq)) {
+                    applySeek(targetMs, seq, codecRunning);
+                    return false;
+                }
+            }
+
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return true;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    };
+
     // 针对 audio/raw 格式（如 WAV）启用直通模式，绕过硬件解码器
     if (audioCodecMime == "audio/raw") {
         OH_LOG_INFO(LOG_APP, "MIME type is audio/raw, entering passthrough mode");
@@ -597,7 +629,11 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
             int32_t ret = OH_AVDemuxer_ReadSampleBuffer(demuxer, audioTrackIndex, buffer);
             if (ret != AV_ERR_OK) {
                 OH_LOG_INFO(LOG_APP, "Raw read finished: %{public}d", ret);
-                break; 
+                if (waitForTailSeekWindow(/*codecRunning*/ false)) {
+                    break;
+                }
+                consecutiveNoDataCount = 0;
+                continue;
             }
 
             OH_AVCodecBufferAttr attr;
@@ -651,7 +687,12 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
 
             if (attr.flags & AVCODEC_BUFFER_FLAGS_EOS) {
                 OH_LOG_INFO(LOG_APP, "Raw read EOS");
-                break;
+                ok = true;
+                if (waitForTailSeekWindow(/*codecRunning*/ false)) {
+                    break;
+                }
+                consecutiveNoDataCount = 0;
+                continue;
             }
         }
 
@@ -759,7 +800,11 @@ bool AudioDecoder::DecodeToPcmStream(const std::string& inputPathOrUri,
         });
         if (outRes == StepResult::Eos) {
             ok = true;
-            break;
+            if (waitForTailSeekWindow(/*codecRunning*/ true)) {
+                break;
+            }
+            inputEos = false;
+            continue;
         }
         if (outRes == StepResult::Error) {
             // 如果上层回调返回 false，视为正常取消

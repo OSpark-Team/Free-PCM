@@ -9,7 +9,7 @@
 * **10 段均衡器**：内置 9 种专业级预设（流行、摇滚、爵士等），支持实时增益调整。
 * **非阻塞异步**：全接口 Promise 化，核心任务在 Native 层异步执行，不卡顿 UI 线程。
 * **智能参数**：支持从媒体流自动解析采样率和声道，亦支持手动覆盖。
-* **高稳定性**：适配 API 12+ 的 `writeData` 回调，自适应环形缓冲区（64KB~512KB）。
+* **高稳定性**：适配 API 12+ 的 `writeData` 回调，自适应环形缓冲区（典型约 192KB~16MB，默认按目标缓冲时长估算，已知时长时通常约为 1.25s~1.5s 的 PCM 数据量）。
 
 ---
 
@@ -102,7 +102,7 @@ const decoder = decoderTool.createStreamDecoder(inputPathOrUri, options, callbac
 | `inputPathOrUri` | `string` | 本地路径或 HTTP/HTTPS URL |
 | `options.sampleRate` | `number` | 采样率，0 为自动获取 |
 | `options.eqEnabled` | `boolean` | 是否开启 EQ，默认 `false` |
-| `options.ringBytes` | `number` | 缓冲区大小，不传则按 64KB~512KB 自适应 |
+| `options.ringBytes` | `number` | 缓冲区大小，不传则按 PCM 吞吐/码率/来源类型自适应（典型约 192KB~16MB） |
 
 ### 均衡器预设 `EqPreset`
 

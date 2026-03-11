@@ -45,7 +45,7 @@ export interface PcmStreamInfo {
 export interface PcmStreamDecoderOptions {
   /** 目标采样率 */
   sampleRate?: number;
-  /** 目标声道数 */
+  /** 目标声道数（流式解码支持 1~8 声道；不指定时自动获取） */
   channelCount?: number;
   /** 目标比特率 */
   bitrate?: number;
@@ -58,7 +58,7 @@ export interface PcmStreamDecoderOptions {
    * 注意：对于 WAV 文件，由于采用直通模式不进行转换，即使指定格式也会使用源文件格式
    */
   sampleFormat?: number;
-  /** 内部环形缓冲区大小 (Byte) */
+  /** 内部环形缓冲区大小 (Byte)，不指定时按目标缓冲时长自适应估算；已知时长时通常约为 1.25s~1.5s 的 PCM 数据量，本地/HTTP 仅做上下限保护 */
   ringBytes?: number;
   /** 是否启用均衡器 */
   eqEnabled?: boolean;

@@ -303,11 +303,13 @@ struct Index {
       return;
     }
 
-    if (targetUrl === "test") {
+    if (targetUrl.startsWith("test")) {
+      // 获取扩展名
+      const ext = targetUrl.split(".").pop();
       try {
         const ctx = getContext(this) as common.UIAbilityContext;
-        const fileData = await ctx.resourceManager.getRawFileContent("test.wav");
-        const tempPath = ctx.filesDir + "/temp_input.wav";
+        const fileData = await ctx.resourceManager.getRawFileContent(`test.${ext}`);
+        const tempPath = ctx.filesDir + `/test.${ext}`;
         const file = fs.openSync(tempPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY);
         fs.writeSync(file.fd, fileData.buffer);
         fs.closeSync(file);
@@ -344,7 +346,6 @@ struct Index {
       const decoder = this.decoderTool.createStreamDecoder(
         targetUrl,
         {
-          ringBytes: 10240 * 1024,
           eqEnabled: true,
           eqGainsDb: [...this.eqGainsUnified],
         },

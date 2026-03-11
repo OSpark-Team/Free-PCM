@@ -40,6 +40,11 @@ public:
     void MarkEos();
 
     /**
+     * @brief 清除 EOS 标记
+     */
+    void ResetEos();
+
+    /**
      * @brief 检查是否已到达 EOS
      * @return 如果已到达 EOS 且缓冲区为空，返回 true
      */
