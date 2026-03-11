@@ -128,6 +128,90 @@ size_t PcmRingBuffer::Read(uint8_t* dst, size_t len)
     return n;
 }
 
+size_t PcmRingBuffer::ReadBlocking(uint8_t* dst, size_t len, int timeoutMs)
+{
+    if (dst == nullptr || len == 0) {
+        return 0;
+    }
+
+    std::unique_lock<std::mutex> lock(mu_);
+    
+    // 如果数据已充足，直接读取
+    if (size_ >= len) {
+        const size_t cap = buf_.size();
+        const size_t headToEnd = cap - head_;
+        const size_t first = std::min(len, headToEnd);
+        memcpy(dst, &buf_[head_], first);
+        const size_t second = len - first;
+        if (second > 0) {
+            memcpy(dst + first, &buf_[0], second);
+        }
+        head_ = (head_ + len) % cap;
+        size_ -= len;
+        totalBytesRead_.fetch_add(len);
+        notFull_.notify_all();
+        return len;
+    }
+    
+    // 数据不足，等待条件满足
+    auto waitCondition = [&]() {
+        return canceled_ || eos_ || size_ >= len;
+    };
+    
+    if (timeoutMs < 0) {
+        // 无限等待
+        notEmpty_.wait(lock, waitCondition);
+    } else {
+        // 带超时等待
+        if (!notEmpty_.wait_for(lock, std::chrono::milliseconds(timeoutMs), waitCondition)) {
+            // 超时，返回 0
+            return 0;
+        }
+    }
+    
+    // 检查取消状态
+    if (canceled_) {
+        return 0;
+    }
+    
+    // 检查 EOS 状态
+    if (eos_ && size_ < len) {
+        // EOS 已到达但数据不足，返回可用的数据
+        if (size_ == 0) {
+            return 0;
+        }
+        const size_t n = size_;
+        const size_t cap = buf_.size();
+        const size_t headToEnd = cap - head_;
+        const size_t first = std::min(n, headToEnd);
+        memcpy(dst, &buf_[head_], first);
+        const size_t second = n - first;
+        if (second > 0) {
+            memcpy(dst + first, &buf_[0], second);
+        }
+        head_ = (head_ + n) % cap;
+        size_ = 0;
+        totalBytesRead_.fetch_add(n);
+        notFull_.notify_all();
+        return n;
+    }
+    
+    // 数据充足，执行读取
+    const size_t cap = buf_.size();
+    const size_t headToEnd = cap - head_;
+    const size_t first = std::min(len, headToEnd);
+    memcpy(dst, &buf_[head_], first);
+    const size_t second = len - first;
+    if (second > 0) {
+        memcpy(dst + first, &buf_[0], second);
+    }
+    head_ = (head_ + len) % cap;
+    size_ -= len;
+    totalBytesRead_.fetch_add(len);
+    notFull_.notify_all();
+    return len;
+}
+
 void PcmRingBuffer::Clear()
 {
     std::lock_guard<std::mutex> lock(mu_);

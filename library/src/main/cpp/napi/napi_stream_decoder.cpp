@@ -351,6 +351,7 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info) {
 // For AudioRenderer.on('writeData') (API 12+):
 // - return 0 when not enough data, so caller can return INVALID without consuming the ring
 // - return full buffer length when enough data, or when EOS is marked (with padding)
+// - Uses ReadBlocking with timeout to reduce high-frequency INVALID returns
 napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
@@ -384,6 +385,14 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
         return zero;
     }
 
+    // Check if decoder is paused - don't block in paused state
+    if (ctx->decoderPaused.load()) {
+        napi_value zero;
+        napi_create_int32(env, 0, &zero);
+        return zero;
+    }
+
+    // Fast path: data already available
     const size_t avail = ctx->ring->Available();
     if (avail >= len) {
         (void)ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), len);
@@ -392,16 +401,37 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
         return out;
     }
 
-    if (ctx->ring->IsEosMarked() && avail > 0) {
-        const size_t n = ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), avail);
-        if (n < len) {
-            memset(reinterpret_cast<uint8_t *>(buf) + n, 0, len - n);
+    // EOS path: return available data with zero padding
+    if (ctx->ring->IsEosMarked()) {
+        if (avail > 0) {
+            const size_t n = ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), avail);
+            if (n < len) {
+                memset(reinterpret_cast<uint8_t *>(buf) + n, 0, len - n);
+            }
+            napi_value out;
+            napi_create_int32(env, static_cast<int32_t>(len), &out);
+            return out;
         }
+        napi_value zero;
+        napi_create_int32(env, 0, &zero);
+        return zero;
+    }
+
+    // Slow path: wait for data with timeout
+    // This reduces high-frequency INVALID returns and CPU usage
+    // Timeout: 30ms is a balance between latency and avoiding audio underrun
+    // At 48kHz stereo S16LE: 30ms = ~5760 bytes, which is typically <= AudioRenderer buffer
+    constexpr int kWaitTimeoutMs = 30;
+    const size_t n = ctx->ring->ReadBlocking(reinterpret_cast<uint8_t *>(buf), len, kWaitTimeoutMs);
+    
+    if (n >= len) {
         napi_value out;
         napi_create_int32(env, static_cast<int32_t>(len), &out);
         return out;
     }
-
+    
+    // Timeout or partial read - return 0 to signal INVALID
+    // Note: ReadBlocking already returns 0 on timeout, partial data is not returned
     napi_value zero;
     napi_create_int32(env, 0, &zero);
     return zero;

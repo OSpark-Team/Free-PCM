@@ -70,12 +70,30 @@ public:
     bool Push(const uint8_t* data, size_t len, const std::atomic<bool>* cancelFlag);
 
     /**
-     * @brief 从缓冲区读取数据
+     * @brief 从缓冲区读取数据（非阻塞）
      * @param dst 目标缓冲区
      * @param len 要读取的长度
      * @return 实际读取的字节数
      */
     size_t Read(uint8_t* dst, size_t len);
+
+    /**
+     * @brief 从缓冲区读取数据（带超时阻塞）
+     * @param dst 目标缓冲区
+     * @param len 要读取的长度
+     * @param timeoutMs 超时时间（毫秒），-1 表示无限等待
+     * @return 实际读取的字节数，超时返回 0
+     * 
+     * @remarks
+     * 当缓冲区数据不足时，会阻塞等待直到：
+     * 1. 数据充足
+     * 2. 超时
+     * 3. EOS 到达
+     * 4. 被取消
+     * 
+     * 推荐用于 AudioRenderer 的 writeData 回调，避免高频 INVALID 返回。
+     */
+    size_t ReadBlocking(uint8_t* dst, size_t len, int timeoutMs);
 
     /**
      * @brief 清空缓冲区
