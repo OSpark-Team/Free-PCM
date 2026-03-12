@@ -338,9 +338,10 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info) {
     size_t n = 0;
     if (ctx->ring) {
         n = ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), len);
-    }
-    if (n < len) {
-        memset(reinterpret_cast<uint8_t *>(buf) + n, 0, len - n);
+        // Only pad zeros when EOS is marked, not during normal playback
+        if (n < len && ctx->ring->IsEosMarked()) {
+            memset(reinterpret_cast<uint8_t *>(buf) + n, 0, len - n);
+        }
     }
 
     napi_value out;
