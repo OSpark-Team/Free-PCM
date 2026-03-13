@@ -650,6 +650,72 @@ napi_value PcmDecoderSetDrcParams(napi_env env, napi_callback_info info) {
     return undef;
 }
 
+napi_value PcmDecoderSetPitchEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "setPitchEnabled(enabled) requires 1 argument");
+        return nullptr;
+    }
+
+    bool enabled = false;
+    napi_get_value_bool(env, args[0], &enabled);
+    ctx->pitchEnabled.store(enabled);
+    ctx->pitchVersion.fetch_add(1);
+
+    if (ctx->pitchShifter.IsReady()) {
+        ctx->pitchShifter.SetEnabled(enabled);
+    }
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderSetPitchSemitones(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "setPitchSemitones(semitones) requires 1 argument");
+        return nullptr;
+    }
+
+    int32_t semitones = 0;
+    if (napi_get_value_int32(env, args[0], &semitones) != napi_ok) {
+        double d = 0.0;
+        if (napi_get_value_double(env, args[0], &d) == napi_ok) {
+            semitones = static_cast<int32_t>(std::lround(d));
+        } else {
+            napi_throw_error(env, nullptr, "semitones must be a number");
+            return nullptr;
+        }
+    }
+
+    if (semitones < PcmPitchShifter::kMinSemitones) {
+        semitones = PcmPitchShifter::kMinSemitones;
+    }
+    if (semitones > PcmPitchShifter::kMaxSemitones) {
+        semitones = PcmPitchShifter::kMaxSemitones;
+    }
+
+    ctx->pitchSemitones.store(semitones);
+    ctx->pitchVersion.fetch_add(1);
+
+    if (ctx->pitchShifter.IsReady()) {
+        ctx->pitchShifter.SetSemitones(semitones);
+    }
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
 napi_value PcmDecoderSetEqGainsLR(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
@@ -978,6 +1044,11 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         ctx->drc.Init(sr, cc);
         ctx->drc.SetEnabled(ctx->drcEnabled.load());
 
+        ctx->pitchAppliedVersion = 0;
+        ctx->pitchShifter.Init(sr, cc);
+        ctx->pitchShifter.SetEnabled(ctx->pitchEnabled.load());
+        ctx->pitchShifter.SetSemitones(ctx->pitchSemitones.load());
+
         ctx->limiter.Init(sr, cc);
         ctx->limiter.SetEnabled(true);
         ctx->limiter.SetParams(-1.0f, 5.0f, 1.0f, 80.0f);
@@ -1091,6 +1162,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         const bool drcEnabled = ctx->drcEnabled.load();
         const bool needDrc = drcEnabled && ctx->drc.IsReady();
 
+        const bool pitchEnabled = ctx->pitchEnabled.load();
+        const bool needPitch = pitchEnabled && ctx->pitchShifter.IsReady() && ctx->pitchSemitones.load() != 0;
+
         // Per-channel volume compensation.
         const int32_t volL1000 = ctx->channelVol1000[0].load();
         const int32_t volR1000 = ctx->channelVol1000[1].load();
@@ -1135,7 +1209,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         const bool needChanVol = chanVolSupported &&
                                  ((ch == 1 && volL1000 != 1000) || (ch == 2 && (volL1000 != 1000 || volR1000 != 1000)));
 
-        if (!needEq && !needChanVol && !needDrc) {
+        if (!needEq && !needChanVol && !needDrc && !needPitch) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
@@ -1256,6 +1330,18 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
         if (needEq) {
             ctx->eq.ProcessFloat(ctx->dspScratchF.data(), frameCount);
+        }
+
+        if (needPitch) {
+            const uint32_t pv = ctx->pitchVersion.load();
+            if (pv != ctx->pitchAppliedVersion) {
+                ctx->pitchShifter.SetSemitones(ctx->pitchSemitones.load());
+                ctx->pitchAppliedVersion = pv;
+            }
+            ctx->pitchShifter.SetEnabled(true);
+            ctx->pitchShifter.ProcessFloat(ctx->dspScratchF.data(), frameCount);
+        } else {
+            ctx->pitchShifter.SetEnabled(false);
         }
 
         if (needChanVol) {
@@ -1501,6 +1587,8 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     bool optEqEnabled = false;
     bool hasEqGains = false;
     std::array<int32_t, PcmEqualizer::kBandCount> optEqGainsDb100 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    bool optPitchEnabled = false;
+    int32_t optPitchSemitones = 0;
 
     // options
     if (argc >= 2 && args[1] != nullptr) {
@@ -1570,6 +1658,30 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
                         }
                     }
                 }
+            }
+
+            if (napi_get_named_property(env, args[1], "pitchEnabled", &v) == napi_ok) {
+                bool b = false;
+                if (napi_get_value_bool(env, v, &b) == napi_ok) {
+                    optPitchEnabled = b;
+                }
+            }
+
+            if (napi_get_named_property(env, args[1], "pitchSemitones", &v) == napi_ok) {
+                int32_t ps = 0;
+                if (napi_get_value_int32(env, v, &ps) != napi_ok) {
+                    double d = 0.0;
+                    if (napi_get_value_double(env, v, &d) == napi_ok) {
+                        ps = static_cast<int32_t>(std::lround(d));
+                    }
+                }
+                if (ps < PcmPitchShifter::kMinSemitones) {
+                    ps = PcmPitchShifter::kMinSemitones;
+                }
+                if (ps > PcmPitchShifter::kMaxSemitones) {
+                    ps = PcmPitchShifter::kMaxSemitones;
+                }
+                optPitchSemitones = ps;
             }
         }
     }
@@ -1648,6 +1760,11 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     ctx->drcMakeupDb100.store(0);
     ctx->drcAppliedVersion = 0;
     ctx->drcMeterLastEmitMs = 0;
+
+    ctx->pitchEnabled.store(optPitchEnabled);
+    ctx->pitchVersion.store(1);
+    ctx->pitchSemitones.store(optPitchSemitones);
+    ctx->pitchAppliedVersion = 0;
 
     // Initialize seek state.
     ctx->seekSeq_.store(0);
@@ -1755,6 +1872,14 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     napi_value setDrcParamsFn;
     napi_create_function(env, "setDrcParams", NAPI_AUTO_LENGTH, PcmDecoderSetDrcParams, ctx, &setDrcParamsFn);
     napi_set_named_property(env, decoderObj, "setDrcParams", setDrcParamsFn);
+
+    napi_value setPitchEnabledFn;
+    napi_create_function(env, "setPitchEnabled", NAPI_AUTO_LENGTH, PcmDecoderSetPitchEnabled, ctx, &setPitchEnabledFn);
+    napi_set_named_property(env, decoderObj, "setPitchEnabled", setPitchEnabledFn);
+
+    napi_value setPitchSemitonesFn;
+    napi_create_function(env, "setPitchSemitones", NAPI_AUTO_LENGTH, PcmDecoderSetPitchSemitones, ctx, &setPitchSemitonesFn);
+    napi_set_named_property(env, decoderObj, "setPitchSemitones", setPitchSemitonesFn);
 
     // Seek 功能方法
     napi_value seekToFn;

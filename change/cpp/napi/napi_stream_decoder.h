@@ -104,6 +104,27 @@ napi_value PcmDecoderSetDrcEnabled(napi_env env, napi_callback_info info);
 napi_value PcmDecoderSetDrcParams(napi_env env, napi_callback_info info);
 
 // ============================================================================
+// Pitch Shifter (变调器) 接口
+// ============================================================================
+
+/**
+ * @brief 设置变调器启用状态
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return undefined
+ */
+napi_value PcmDecoderSetPitchEnabled(napi_env env, napi_callback_info info);
+
+/**
+ * @brief 设置变调器的半音偏移量
+ * @param env NAPI 环境
+ * @param info 回调信息
+ * @return undefined
+ * @remarks 参数范围：-12 到 +12，正数升调，负数降调
+ */
+napi_value PcmDecoderSetPitchSemitones(napi_env env, napi_callback_info info);
+
+// ============================================================================
 // Seek 功能接口
 // ============================================================================
 

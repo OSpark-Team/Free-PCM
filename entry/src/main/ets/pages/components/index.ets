@@ -4,6 +4,7 @@
 export { ControlTab } from './ControlTab';
 export { MixerTab } from './MixerTab';
 export { EqualizerTab } from './EqualizerTab';
+export { PitchTab } from './PitchTab';
 export { DrcTab } from './DrcTab';
 export { SpectrumBars } from './SpectrumBars';
 

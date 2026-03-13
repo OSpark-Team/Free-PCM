@@ -102,7 +102,25 @@ const decoder = decoderTool.createStreamDecoder(inputPathOrUri, options, callbac
 | `inputPathOrUri` | `string` | 本地路径或 HTTP/HTTPS URL |
 | `options.sampleRate` | `number` | 采样率，0 为自动获取 |
 | `options.eqEnabled` | `boolean` | 是否开启 EQ，默认 `false` |
+| `options.pitchEnabled` | `boolean` | 是否启用变调器，默认 `false` |
+| `options.pitchSemitones` | `number` | 半音偏移量（-12 ~ +12），默认 `0` |
 | `options.ringBytes` | `number` | 缓冲区大小，不传则按 PCM 吞吐/码率/来源类型自适应（典型约 192KB~16MB） |
+
+### 变调器（Pitch）调节
+
+```typescript
+import { PcmDecoderTool } from '@ospark/free-pcm';
+
+const decoderTool = new PcmDecoderTool();
+const decoder = decoderTool.createStreamDecoder('/path/to/audio.mp3', {
+  pitchEnabled: true,
+  pitchSemitones: 3,
+});
+
+// 运行时切换
+decoder.setPitchEnabled?.(true);
+decoder.setPitchSemitones?.(-5);
+```
 
 ### 均衡器预设 `EqPreset`
 

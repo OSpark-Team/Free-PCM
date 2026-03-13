@@ -103,6 +103,10 @@ napi_value PcmDecoderSetDrcEnabled(napi_env env, napi_callback_info info);
  */
 napi_value PcmDecoderSetDrcParams(napi_env env, napi_callback_info info);
 
+napi_value PcmDecoderSetPitchEnabled(napi_env env, napi_callback_info info);
+
+napi_value PcmDecoderSetPitchSemitones(napi_env env, napi_callback_info info);
+
 // ============================================================================
 // Seek 功能接口
 // ============================================================================

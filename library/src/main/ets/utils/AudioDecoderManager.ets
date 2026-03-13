@@ -64,6 +64,8 @@ export interface PcmStreamDecoderOptions {
   eqEnabled?: boolean;
   /** 均衡器 10 段增益配置 (dB) */
   eqGainsDb?: number[];
+  pitchEnabled?: boolean;
+  pitchSemitones?: number;
 }
 
 /** DRC 仪表数据 */
@@ -145,6 +147,11 @@ export interface PcmStreamDecoder {
    * @param makeupGainDb 补偿增益（dB，-12~24）
    */
   setDrcParams?: (thresholdDb: number, ratio: number, attackMs: number, releaseMs: number, makeupGainDb: number) => void;
+
+  setPitchEnabled?: (enabled: boolean) => void;
+
+  setPitchSemitones?: (semitones: number) => void;
+
   /**
    * 跳转到指定播放位置
    * @param positionMs 目标位置（毫秒）
