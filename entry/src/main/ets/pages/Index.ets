@@ -15,6 +15,7 @@ import {
   ControlTab,
   MixerTab,
   EqualizerTab,
+  PitchTab,
   DrcTab,
   SpectrumBars,
   COLOR_BG,
@@ -71,6 +72,9 @@ struct Index {
   @State drcReleaseMs: number = 100;
   @State drcMakeupDb: number = 0;
   @State drcPresetLabel: string = "自定义";
+
+  @State pitchEnabled: boolean = false;
+  @State pitchSemitones: number = 0;
 
   // === 内部对象 ===
   private player: AudioRendererPlayer = new AudioRendererPlayer();
@@ -215,6 +219,20 @@ struct Index {
       this.applyDrcSettings();
       this.drcTimerId = -1;
     }, 100);
+  }
+
+  private applyPitchSettings() {
+    if (!this.currentDecoder) return;
+    try {
+      if (this.currentDecoder.setPitchEnabled) {
+        this.currentDecoder.setPitchEnabled(this.pitchEnabled);
+      }
+      if (this.currentDecoder.setPitchSemitones) {
+        this.currentDecoder.setPitchSemitones(this.pitchSemitones);
+      }
+    } catch (e) {
+      console.warn(`Apply pitch failed: ${e}`);
+    }
   }
 
   // === 播放器逻辑 ===
@@ -382,6 +400,7 @@ struct Index {
       this.applyEqSettings();
       this.applyChannelVolumes();
       this.applyDrcSettings();
+      this.applyPitchSettings();
 
       await this.player.play(decoder, info);
       await decoder.done;
@@ -622,6 +641,26 @@ struct Index {
             onDrawMeter: () => {},
           })
         }.tabBar(this.TabTitle("压缩", 3))
+
+        TabContent() {
+          PitchTab({
+            pitchEnabled: this.pitchEnabled,
+            pitchSemitones: this.pitchSemitones,
+            onEnabledChange: (enabled) => {
+              this.pitchEnabled = enabled;
+              this.applyPitchSettings();
+            },
+            onSemitonesChange: (semitones) => {
+              this.pitchSemitones = semitones;
+              this.applyPitchSettings();
+            },
+            onReset: () => {
+              this.pitchEnabled = false;
+              this.pitchSemitones = 0;
+              this.applyPitchSettings();
+            },
+          })
+        }.tabBar(this.TabTitle("变调", 4))
       }
       .layoutWeight(1)
       .onChange((i) => (this.currentIndex = i))

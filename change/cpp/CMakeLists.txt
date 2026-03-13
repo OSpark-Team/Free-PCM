@@ -15,7 +15,7 @@ include_directories(${NATIVERENDER_ROOT_PATH}
                     ${NATIVERENDER_ROOT_PATH}/types)
 
 # Core decoder modules
-add_library(library SHARED
+add_library(freepcm SHARED
     # NAPI interface
     napi_init.cpp
     napi/napi_utils.cpp
@@ -32,10 +32,10 @@ add_library(library SHARED
     # Buffer module
     buffer/ring_buffer.cpp)
 
-target_link_libraries(library PUBLIC libace_napi.z.so)
-target_link_libraries(library PUBLIC libhilog_ndk.z.so)
-target_link_libraries(library PUBLIC libnative_media_codecbase.so)
-target_link_libraries(library PUBLIC libnative_media_core.so)
-target_link_libraries(library PUBLIC libnative_media_acodec.so)
-target_link_libraries(library PUBLIC libnative_media_avdemuxer.so)
-target_link_libraries(library PUBLIC libnative_media_avsource.so)
+target_link_libraries(freepcm PUBLIC libace_napi.z.so)
+target_link_libraries(freepcm PUBLIC libhilog_ndk.z.so)
+target_link_libraries(freepcm PUBLIC libnative_media_codecbase.so)
+target_link_libraries(freepcm PUBLIC libnative_media_core.so)
+target_link_libraries(freepcm PUBLIC libnative_media_acodec.so)
+target_link_libraries(freepcm PUBLIC libnative_media_avdemuxer.so)
+target_link_libraries(freepcm PUBLIC libnative_media_avsource.so)

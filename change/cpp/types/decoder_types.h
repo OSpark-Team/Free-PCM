@@ -172,9 +172,10 @@ struct PcmStreamDecoderContext {
 
     uint64_t drcMeterLastEmitMs;
 
+    // Pitch shifter (变调器)
     std::atomic<bool> pitchEnabled;
     std::atomic<uint32_t> pitchVersion;
-    std::atomic<int32_t> pitchSemitones;
+    std::atomic<int32_t> pitchSemitones;  // -12 to +12 semitones
 
     uint32_t pitchAppliedVersion;
     PcmPitchShifter pitchShifter;

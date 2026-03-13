@@ -527,6 +527,79 @@ napi_value PcmDecoderSetDrcParams(napi_env env, napi_callback_info info) {
     return undef;
 }
 
+// ============================================================================
+// Pitch Shifter (变调器)
+// ============================================================================
+
+napi_value PcmDecoderSetPitchEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "setPitchEnabled(enabled) requires 1 argument");
+        return nullptr;
+    }
+
+    bool enabled = false;
+    napi_get_value_bool(env, args[0], &enabled);
+    ctx->pitchEnabled.store(enabled);
+    ctx->pitchVersion.fetch_add(1);
+
+    // Apply pitch enabled immediately if pitch shifter is already initialized
+    if (ctx->pitchShifter.IsReady()) {
+        ctx->pitchShifter.SetEnabled(enabled);
+    }
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderSetPitchSemitones(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "setPitchSemitones(semitones) requires 1 argument");
+        return nullptr;
+    }
+
+    int32_t semitones = 0;
+    if (napi_get_value_int32(env, args[0], &semitones) != napi_ok) {
+        double d = 0.0;
+        if (napi_get_value_double(env, args[0], &d) == napi_ok) {
+            semitones = static_cast<int32_t>(std::lround(d));
+        } else {
+            napi_throw_error(env, nullptr, "semitones must be a number");
+            return nullptr;
+        }
+    }
+
+    // Clamp to valid range (-12 to +12)
+    if (semitones < PcmPitchShifter::kMinSemitones) {
+        semitones = PcmPitchShifter::kMinSemitones;
+    }
+    if (semitones > PcmPitchShifter::kMaxSemitones) {
+        semitones = PcmPitchShifter::kMaxSemitones;
+    }
+
+    ctx->pitchSemitones.store(semitones);
+    ctx->pitchVersion.fetch_add(1);
+
+    // Apply pitch semitones immediately if pitch shifter is already initialized
+    if (ctx->pitchShifter.IsReady()) {
+        ctx->pitchShifter.SetSemitones(semitones);
+    }
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
 napi_value PcmDecoderSetEqGainsLR(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
@@ -887,6 +960,12 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         ctx->limiter.SetEnabled(true);
         ctx->limiter.SetParams(-1.0f, 5.0f, 1.0f, 80.0f);
 
+        // Initialize pitch shifter
+        ctx->pitchAppliedVersion = 0;
+        ctx->pitchShifter.Init(sr, cc);
+        ctx->pitchShifter.SetEnabled(ctx->pitchEnabled.load());
+        ctx->pitchShifter.SetSemitones(ctx->pitchSemitones.load());
+
         ctx->actualSampleRate = sr;
         ctx->actualChannelCount = cc;
         ctx->sourceSampleFormat = sf;
@@ -901,70 +980,31 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
         size_t rb = ctx->ringBytes;
         if (rb == 0) {
-            // --- 动态常数定义 ---
-            constexpr size_t kStep = 64 * 1024;      // 64KB 步进对齐
-            constexpr size_t kMinLimit = 128 * 1024; // 最小提升到 128KB，确保 Hi-Res 基础缓冲
-            size_t kMaxLimit = 1024 * 1024;          // 默认最大 1MB
+            // --- 动态计算缓冲区大小 ---
+            // 公式: 比特率(kbps) * 2048，上限 50MB，下限2MB
+            constexpr size_t kMaxLimit = 50 * 1024 * 1024; // 最大 50MB
+            constexpr size_t kMinLimit = 2 * 1024 * 1024; // 最小 2MB
 
-            const bool isHttp =
-                (ctx->inputPathOrUri.rfind("http://", 0) == 0) || (ctx->inputPathOrUri.rfind("https://", 0) == 0);
-
-            // 精确计算每秒字节数 (BPS)
-            const int32_t bytesPerSample = (sf >= 3 || sf == 2) ? 4 : 2;
-            const uint64_t bytesPerSecond = (sr > 0 && cc > 0) ? static_cast<uint64_t>(sr) * static_cast<uint64_t>(cc) *
-                                                                     static_cast<uint64_t>(bytesPerSample)
-                                                               : 0;
-
-            // 针对高采样率 (如 192k) 自动提升上限
-            // 如果是 192k/24bit，BPS 超过 1MB/s，我们将上限放宽到 2MB 或 4MB
-            if (bytesPerSecond > 1000000) {
-                kMaxLimit = 2 * 1024 * 1024;
+            // 使用传入的比特率参数
+            int32_t bitrateKbps = ctx->bitrate;
+            if (bitrateKbps <= 0) {
+                // 如果没有指定比特率，根据音频格式估算
+                // 估算公式: 采样率 * 声道数 * 位深 / 1000
+                const int32_t bitsPerSample = (sf >= 3 || sf == 2) ? 32 : 16;
+                bitrateKbps = (sr * cc * bitsPerSample) / 1000;
             }
 
-            // 动态计算目标时长 (targetSec)
-            double targetSec = 0.0;
-            if (durMs > 0) {
-                // 本地长音频或普通曲目
-                if (durMs < 30 * 1000) {
-                    targetSec = 0.30; // 短音频保持灵敏度
-                } else if (durMs < 10 * 60 * 1000) {
-                    targetSec = 0.60; // 常规曲目平衡点
-                } else {
-                    targetSec = 0.80; // 长音频侧重稳定
-                }
-            } else {
-                // 网络直播流或未知长度
-                targetSec = isHttp ? 1.20 : 0.60;
-            }
+            // 计算缓冲区大小: 比特率(kbps) * 4096
+            uint64_t desired = static_cast<uint64_t>(bitrateKbps) * 4096;
 
-            // 环境补偿
-            if (isHttp) {
-                targetSec += 0.30; // 网络环境下增加 300ms 冗余
-            }
-
-            // 计算期望字节数
-            uint64_t desired = 0;
-            if (bytesPerSecond > 0 && targetSec > 0.0) {
-                desired = static_cast<uint64_t>(static_cast<double>(bytesPerSecond) * targetSec);
-            }
-
-            // 边界处理与阶梯化对齐
+            // 边界处理
             rb = static_cast<size_t>(desired);
-
-            // 确保不低于最小值，不超过当前规格下的最大值
-            if (rb < kMinLimit)
-                rb = kMinLimit;
-            if (rb > kMaxLimit)
+            if (rb > kMaxLimit) {
                 rb = kMaxLimit;
-
-            // 向上取整到 kStep 的倍数 (对 CPU/内存总线更友好)
-            rb = ((rb + kStep - 1) / kStep) * kStep;
-
-            // 再次约束边界
-            if (rb < kMinLimit)
+            }
+            if (rb < kMinLimit) {
                 rb = kMinLimit;
-            if (rb > kMaxLimit)
-                rb = kMaxLimit;
+            }
 
             ctx->ringBytes = rb;
         }
@@ -1031,7 +1071,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             if (ctx->seekSeq_.load() != ctx->seekHandledSeq_.load()) {
                 break;  // Exit pause to process seek
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
 
         if (ctx->cancel.load()) {
@@ -1059,6 +1099,9 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
         const bool eqEnabled = ctx->eqEnabled.load();
         const bool needEq = eqEnabled && ctx->eq.IsReady();
+
+        const bool pitchEnabled = ctx->pitchEnabled.load();
+        const bool needPitch = pitchEnabled && ctx->pitchShifter.IsReady() && ctx->pitchSemitones.load() != 0;
 
         const bool drcEnabled = ctx->drcEnabled.load();
         const bool needDrc = drcEnabled && ctx->drc.IsReady();
@@ -1106,7 +1149,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         const bool needChanVol = (ch == 1 && volL1000 != 1000) ||
                                  (ch == 2 && (volL1000 != 1000 || volR1000 != 1000));
 
-        if (!needEq && !needChanVol && !needDrc) {
+        if (!needEq && !needChanVol && !needDrc && !needPitch) {
             return ctx->ring->Push(pcm, size, &ctx->cancel);
         }
 
@@ -1228,6 +1271,19 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
 
         if (needEq) {
             ctx->eq.ProcessFloat(ctx->dspScratchF.data(), frameCount);
+        }
+
+        // Pitch shifting (after EQ, before DRC)
+        if (needPitch) {
+            const uint32_t pv = ctx->pitchVersion.load();
+            if (pv != ctx->pitchAppliedVersion) {
+                ctx->pitchShifter.SetSemitones(ctx->pitchSemitones.load());
+                ctx->pitchAppliedVersion = pv;
+            }
+            ctx->pitchShifter.SetEnabled(true);
+            ctx->pitchShifter.ProcessFloat(ctx->dspScratchF.data(), frameCount);
+        } else {
+            ctx->pitchShifter.SetEnabled(false);
         }
 
         if (needChanVol) {
@@ -1544,6 +1600,33 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
         }
     }
 
+    // Pitch shifter options
+    bool optPitchEnabled = false;
+    int32_t optPitchSemitones = 0;
+
+    if (argc >= 2 && args[1] != nullptr) {
+        napi_valuetype t;
+        napi_typeof(env, args[1], &t);
+        if (t == napi_object) {
+            napi_value v;
+            if (napi_get_named_property(env, args[1], "pitchEnabled", &v) == napi_ok) {
+                bool b = false;
+                if (napi_get_value_bool(env, v, &b) == napi_ok) {
+                    optPitchEnabled = b;
+                }
+            }
+            if (napi_get_named_property(env, args[1], "pitchSemitones", &v) == napi_ok) {
+                int32_t s = 0;
+                if (napi_get_value_int32(env, v, &s) == napi_ok) {
+                    // Clamp to valid range
+                    if (s < PcmPitchShifter::kMinSemitones) s = PcmPitchShifter::kMinSemitones;
+                    if (s > PcmPitchShifter::kMaxSemitones) s = PcmPitchShifter::kMaxSemitones;
+                    optPitchSemitones = s;
+                }
+            }
+        }
+    }
+
     // callbacks
     napi_value onProgress = nullptr;
     napi_value onError = nullptr;
@@ -1618,6 +1701,12 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     ctx->drcMakeupDb100.store(0);
     ctx->drcAppliedVersion = 0;
     ctx->drcMeterLastEmitMs = 0;
+
+    // Pitch shifter defaults (disabled)
+    ctx->pitchEnabled.store(optPitchEnabled);
+    ctx->pitchVersion.store(1);
+    ctx->pitchSemitones.store(optPitchSemitones);
+    ctx->pitchAppliedVersion = 0;
 
     // Initialize seek state.
     ctx->seekSeq_.store(0);
@@ -1725,6 +1814,15 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     napi_value setDrcParamsFn;
     napi_create_function(env, "setDrcParams", NAPI_AUTO_LENGTH, PcmDecoderSetDrcParams, ctx, &setDrcParamsFn);
     napi_set_named_property(env, decoderObj, "setDrcParams", setDrcParamsFn);
+
+    // Pitch shifter methods
+    napi_value setPitchEnabledFn;
+    napi_create_function(env, "setPitchEnabled", NAPI_AUTO_LENGTH, PcmDecoderSetPitchEnabled, ctx, &setPitchEnabledFn);
+    napi_set_named_property(env, decoderObj, "setPitchEnabled", setPitchEnabledFn);
+
+    napi_value setPitchSemitonesFn;
+    napi_create_function(env, "setPitchSemitones", NAPI_AUTO_LENGTH, PcmDecoderSetPitchSemitones, ctx, &setPitchSemitonesFn);
+    napi_set_named_property(env, decoderObj, "setPitchSemitones", setPitchSemitonesFn);
 
     // Seek 功能方法
     napi_value seekToFn;

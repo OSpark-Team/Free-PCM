@@ -108,6 +108,10 @@ export type PcmStreamDecoderOptions = {
    * eqGainsDb: [5, 4, 3, 1, 0, -1, 1, 3, 4, 5] // V型响应
    */
   eqGainsDb?: number[];
+
+  pitchEnabled?: boolean;
+
+  pitchSemitones?: number;
 };
 
 /**
@@ -308,6 +312,10 @@ export type PcmStreamDecoder = {
    * @remarks 参数顺序：thresholdDb, ratio, attackMs, releaseMs, makeupGainDb
    */
   setDrcParams?: (thresholdDb: number, ratio: number, attackMs: number, releaseMs: number, makeupGainDb: number) => void;
+
+  setPitchEnabled?: (enabled: boolean) => void;
+
+  setPitchSemitones?: (semitones: number) => void;
 
   /**
    * 跳转到指定播放位置（毫秒）
