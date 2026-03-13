@@ -1,10 +1,14 @@
 import { promptAction, window } from "@kit.ArkUI";
 import { BusinessError } from "@kit.BasicServicesKit";
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   AudioRendererPlayer,
+  AudioRendererPlayerDebugOptions,
+  PcmTapOptions,
   PcmDecoderTool,
   PcmEqualizer,
   PcmStreamDecoder,
+  PcmStreamDecoderOptions,
   DecodeAudioProgress,
   PcmStreamDecoderCallbacks,
 } from "@ospark/free-pcm";
@@ -78,6 +82,7 @@ struct Index {
   private eq: PcmEqualizer = new PcmEqualizer();
   private currentDecoder: PcmStreamDecoder | null = null;
   private bufferingTimerId: number = -1;
+  private debugTimerId: number = -1;
   private volTimerId: number = -1;
   private drcTimerId: number = -1;
   private lastPosMs: number = 0;
@@ -116,6 +121,8 @@ struct Index {
   });
   private vizTimerId: number = -1;
 
+  @State enableVizTap: boolean = true;
+
   private startVizTimer(): void {
     if (this.vizTimerId !== -1) return;
     this.vizTimerId = setInterval(() => {
@@ -144,6 +151,27 @@ struct Index {
       clearInterval(this.vizTimerId);
       this.vizTimerId = -1;
     }
+  }
+
+  private attachVizTap(): void {
+    this.player.setOnPcmData(
+      (pcmBuf, bytesWritten, streamInfo) => {
+        this.spectrum.setStreamFormat(
+          streamInfo.sampleRate,
+          streamInfo.sampleFormatCode,
+          streamInfo.channelCount,
+        );
+        this.spectrum.pushPcm(pcmBuf, bytesWritten);
+      },
+      { minIntervalMs: 16 },
+    );
+    this.spectrum.setTilt(this.tiltEnabled, 4.5, 1000);
+    this.startVizTimer();
+  }
+
+  private detachVizTap(): void {
+    this.player.setOnPcmData(null);
+    this.stopVizTimer();
   }
 
   // === 生命周期 ===
@@ -247,6 +275,33 @@ struct Index {
     this.isBuffering = false;
   }
 
+  private startDebugTimer(): void {
+    if (this.debugTimerId !== -1) return;
+    this.debugTimerId = setInterval(() => {
+      const pStats = this.player.getDebugStats();
+      hilog.info(0x0000, 'free-pcm-debug',
+        `writeData calls=${pStats.writeDataCalls} valid=${pStats.writeDataValid} invalid=${pStats.writeDataInvalid} lastBytes=${pStats.writeDataLastBytes} maxCostMs=${pStats.writeDataMaxCostMs} underflow=${pStats.underflowCount} (+${pStats.underflowDelta}) jank=${pStats.audioJankEvents}`);
+
+      const d = this.currentDecoder;
+      if (d && d.getDebugStats) {
+        try {
+          const s = d.getDebugStats();
+          hilog.info(0x0000, 'free-pcm-debug',
+            `native writeCalls=${s.writeCalls} writeZero=${s.writeZero} availLast=${s.availLast} writeMaxUs=${s.writeMaxUs} dspLastUs=${s.dspLastUs} dspMaxUs=${s.dspMaxUs}`);
+        } catch (e) {
+          // ignore
+        }
+      }
+    }, 1000);
+  }
+
+  private stopDebugTimer(): void {
+    if (this.debugTimerId !== -1) {
+      clearInterval(this.debugTimerId);
+      this.debugTimerId = -1;
+    }
+  }
+
   private async doSeek(targetMs: number) {
     if (!this.player || !this.currentDecoder || this.isSeeking) return;
     this.isSeeking = true;
@@ -310,9 +365,9 @@ struct Index {
         const ctx = getContext(this) as common.UIAbilityContext;
         const fileData = await ctx.resourceManager.getRawFileContent(`test.${ext}`);
         const tempPath = ctx.filesDir + `/test.${ext}`;
-        const file = fs.openSync(tempPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY);
-        fs.writeSync(file.fd, fileData.buffer);
-        fs.closeSync(file);
+        const file = await fs.open(tempPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY);
+        await fs.write(file.fd, fileData.buffer);
+        await fs.close(file);
         targetUrl = tempPath;
       } catch (e) {
         promptAction.showToast({ message: "文件读取失败" });
@@ -345,14 +400,33 @@ struct Index {
 
       const decoder = this.decoderTool.createStreamDecoder(
         targetUrl,
-        {
-          eqEnabled: true,
-          eqGainsDb: [...this.eqGainsUnified],
-        },
+        (() => {
+          const opts: PcmStreamDecoderOptions = {
+            qosLevel: -2,
+            eqEnabled: true,
+            eqGainsDb: [...this.eqGainsUnified],
+          };
+          return opts;
+        })(),
         callbacks,
       );
 
       this.currentDecoder = decoder;
+
+      const dbgOpts: AudioRendererPlayerDebugOptions = {
+        measureWriteDataCost: true,
+        underflowSampleIntervalMs: 1000,
+        enableAudioJankWatcher: false,
+      };
+      this.player.setDebugEnabled(true, dbgOpts);
+      if (decoder.setDebugEnabled) {
+        try {
+          decoder.setDebugEnabled(true);
+        } catch (e) {
+          // ignore
+        }
+      }
+      this.startDebugTimer();
       const info = await decoder.ready;
       this.durationMs = info.durationMs ?? 0;
       this.status = `播放中: ${info.sampleRate}Hz，${info.sampleFormatCode}，${info.channelCount}ch`;
@@ -361,23 +435,11 @@ struct Index {
         if (!this.isDraggingSeek) this.currentPosMs = pos;
       });
 
-      // PCM tap: only push samples (keep it light; no FFT here)
-      this.player.setOnPcmData(
-        (pcmBuf, bytesWritten, streamInfo) => {
-          this.spectrum.setStreamFormat(
-            streamInfo.sampleRate,
-            streamInfo.sampleFormatCode,
-            streamInfo.channelCount,
-          );
-          this.spectrum.pushPcm(pcmBuf, bytesWritten);
-        },
-        { minIntervalMs: 16 },
-      );
-
-      // apply current tilt setting
-      this.spectrum.setTilt(this.tiltEnabled, 4.5, 1000);
-
-      this.startVizTimer();
+      if (this.enableVizTap) {
+        this.attachVizTap();
+      } else {
+        this.detachVizTap();
+      }
 
       this.applyEqSettings();
       this.applyChannelVolumes();
@@ -394,9 +456,9 @@ struct Index {
         this.vizBands01 = new Array(64).fill(0);
         this.vizPeaks01 = new Array(64).fill(-1);
         this.spectrum.reset();
-        this.player.setOnPcmData(null);
-        this.stopVizTimer();
+        this.detachVizTap();
         this.stopBufferingWatchdog();
+        this.stopDebugTimer();
       }
     } catch (err) {
       if (this.currentDecoder) {
@@ -411,6 +473,7 @@ struct Index {
   // === 重置/停止逻辑 ===
   private async resetPlayback() {
     this.stopBufferingWatchdog();
+    this.stopDebugTimer();
     try {
       await this.player.stop();
     } catch (e) {
@@ -437,10 +500,7 @@ struct Index {
     this.vizPeaks01 = new Array(64).fill(-1);
     this.spectrum.reset();
 
-    // detach PCM tap
-    this.player.setOnPcmData(null);
-
-    this.stopVizTimer();
+    this.detachVizTap();
   }
 
   // === Tab 标题 ===
@@ -522,6 +582,24 @@ struct Index {
           })
       }
       .width("100%")
+      .padding({ left: 24, right: 24, bottom: 12 })
+
+      Row() {
+        Text('频谱采样')
+          .fontSize(14)
+          .fontColor(COLOR_TEXT_SEC)
+        Blank()
+        Toggle({ type: ToggleType.Switch, isOn: this.enableVizTap })
+          .onChange((v) => {
+            this.enableVizTap = v;
+            if (this.enableVizTap) {
+              this.attachVizTap();
+            } else {
+              this.detachVizTap();
+            }
+          })
+      }
+      .width('100%')
       .padding({ left: 24, right: 24, bottom: 12 })
 
       // Tabs 区域

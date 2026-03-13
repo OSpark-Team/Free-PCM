@@ -351,20 +351,6 @@ napi_value PcmDecoderFill(napi_env env, napi_callback_info info) {
     return out;
 }
 
-// For AudioRenderer.on('writeData') (API 12+):
-// - return 0 when not enough data, so caller can return INVALID without consuming the ring
-// - return full buffer length when enough data, or when EOS is marked (with padding)
-// - Uses ReadBlocking with adaptive timeout to reduce high-frequency INVALID returns
-//
-// Low-power renderer behavior (per HarmonyOS docs):
-// - System cache: 1000ms (screen on) / 10000ms (screen off)
-// - Request frequency: ~1ms per request to fill cache
-// - If app can't provide data fast enough, degrades to normal renderer
-//
-// Our strategy:
-// - When data is almost ready (>75% of requested): wait longer (up to 50ms)
-// - When data is scarce (<25%): wait shorter (10ms) to allow system to retry
-// - This balances between: filling system cache AND avoiding audio underrun
 napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};

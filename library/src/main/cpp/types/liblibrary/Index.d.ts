@@ -355,6 +355,10 @@ export type AudioRendererPlayerDebugStats = {
   lastAudioJankEventJson: string;
 };
 
+export type PcmTapOptions = {
+  minIntervalMs?: number;
+};
+
 /**
  * 解码音频文件为 PCM 格式（同步接口）
  *

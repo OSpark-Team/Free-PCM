@@ -101,6 +101,16 @@ export interface PcmStreamDecoderCallbacks {
   onDrcMeter?: (m: DrcMeterInfo) => void;
 }
 
+
+interface DebugStats {
+  writeCalls: number;
+  writeZero: number;
+  availLast: number;
+  writeMaxUs: number;
+  dspLastUs: number;
+  dspMaxUs: number;
+}
+
 /** 流式 PCM 解码器接口 */
 export interface PcmStreamDecoder {
   /** 解码器就绪后的 Promise，返回流信息 */
@@ -122,14 +132,7 @@ export interface PcmStreamDecoder {
   fillForWriteData?: (buffer: ArrayBuffer) => number;
 
   setDebugEnabled?: (enabled: boolean) => void;
-  getDebugStats?: () => {
-    writeCalls: number;
-    writeZero: number;
-    availLast: number;
-    writeMaxUs: number;
-    dspLastUs: number;
-    dspMaxUs: number;
-  };
+  getDebugStats?: () => DebugStats;
   /** 关闭解码器并释放资源 */
   close: () => void;
   /** 设置均衡器开关状态 */

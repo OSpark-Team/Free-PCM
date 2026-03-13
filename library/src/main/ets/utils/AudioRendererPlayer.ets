@@ -47,7 +47,7 @@ import type { PcmStreamDecoder, PcmStreamInfo } from './AudioDecoderManager';
 
 export type PcmDataCallback = (pcmBuffer: ArrayBuffer, bytesWritten: number, info: PcmStreamInfo) => void;
 
-interface PcmDataOptions {
+export interface PcmTapOptions {
   minIntervalMs?: number;
 }
 
@@ -215,7 +215,7 @@ export class AudioRendererPlayer {
    * - pcmBuffer 可能会被系统复用；如需异步使用请自行复制。
    * - bytesWritten 表示本次写入有效字节数（仅前 bytesWritten 字节有效）。
    */
-  public setOnPcmData(callback: PcmDataCallback | null, options?: PcmDataOptions): void {
+  public setOnPcmData(callback: PcmDataCallback | null, options?: PcmTapOptions): void {
     this.onPcmDataCallback = callback;
     const minIntervalMs = options?.minIntervalMs ?? 0;
     this.pcmTapMinIntervalMs = Number.isFinite(minIntervalMs) && minIntervalMs > 0 ? Math.floor(minIntervalMs) : 0;
