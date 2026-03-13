@@ -41,6 +41,7 @@
 
 import { audio } from '@kit.AudioKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { hiAppEvent, hilog } from '@kit.PerformanceAnalysisKit';
 
 import type { PcmStreamDecoder, PcmStreamInfo } from './AudioDecoderManager';
 
@@ -54,10 +55,50 @@ interface AudioRendererCallbacks {
   onCreated?: (renderer: audio.AudioRenderer) => void;
 }
 
+export interface AudioRendererPlayerDebugOptions {
+  measureWriteDataCost?: boolean;
+  underflowSampleIntervalMs?: number;
+  enableAudioJankWatcher?: boolean;
+}
+
+export class AudioRendererPlayerDebugStats {
+  public writeDataCalls: number = 0;
+  public writeDataValid: number = 0;
+  public writeDataInvalid: number = 0;
+  public writeDataLastBytes: number = 0;
+  public writeDataMaxCostMs: number = 0;
+
+  public underflowCount: number = 0;
+  public underflowDelta: number = 0;
+
+  public audioJankEvents: number = 0;
+  public lastAudioJankEventJson: string = '';
+
+  public reset(): void {
+    this.writeDataCalls = 0;
+    this.writeDataValid = 0;
+    this.writeDataInvalid = 0;
+    this.writeDataLastBytes = 0;
+    this.writeDataMaxCostMs = 0;
+    this.underflowCount = 0;
+    this.underflowDelta = 0;
+    this.audioJankEvents = 0;
+    this.lastAudioJankEventJson = '';
+  }
+}
+
 export class AudioRendererPlayer {
   private renderer: audio.AudioRenderer | null = null;
   private decoder: PcmStreamDecoder | null = null;
   private streamInfo: PcmStreamInfo | null = null;
+
+  private debugEnabled_: boolean = false;
+  private debugMeasureWriteDataCost_: boolean = false;
+  private debugUnderflowSampleIntervalMs_: number = 1000;
+  private debugUnderflowTimerId_: number = -1;
+  private debugAudioJankWatcherEnabled_: boolean = false;
+  private debugAudioJankWatcherInstalled_: boolean = false;
+  private debugStats_: AudioRendererPlayerDebugStats = new AudioRendererPlayerDebugStats();
 
   // 位置追踪和时间更新相关
   private timeUpdateTimerId: number = -1;
@@ -71,6 +112,91 @@ export class AudioRendererPlayer {
 
   // 创建AudioRendererCallback
   private onCreatedCallback: ((renderer: audio.AudioRenderer) => void) | null = null;
+
+  public setDebugEnabled(enabled: boolean, options?: AudioRendererPlayerDebugOptions): void {
+    this.debugEnabled_ = enabled;
+    this.debugMeasureWriteDataCost_ = options?.measureWriteDataCost === true;
+
+    const interval = options?.underflowSampleIntervalMs;
+    if (typeof interval === 'number' && Number.isFinite(interval)) {
+      this.debugUnderflowSampleIntervalMs_ = Math.floor(interval);
+    }
+
+    this.debugAudioJankWatcherEnabled_ = options?.enableAudioJankWatcher === true;
+
+    if (!enabled) {
+      this.stopUnderflowSampling_();
+      return;
+    }
+
+    this.startUnderflowSampling_();
+    if (this.debugAudioJankWatcherEnabled_) {
+      this.ensureAudioJankWatcherInstalled_();
+    }
+  }
+
+  public getDebugStats(): AudioRendererPlayerDebugStats {
+    return this.debugStats_;
+  }
+
+  public resetDebugStats(): void {
+    this.debugStats_.reset();
+  }
+
+  private startUnderflowSampling_(): void {
+    this.stopUnderflowSampling_();
+    if (!this.debugEnabled_) return;
+    if (this.debugUnderflowSampleIntervalMs_ <= 0) return;
+
+    this.debugUnderflowTimerId_ = setInterval(() => {
+      if (!this.debugEnabled_) return;
+      if (!this.renderer) return;
+      try {
+        const now = this.renderer.getUnderflowCountSync();
+        const prev = this.debugStats_.underflowCount;
+        this.debugStats_.underflowCount = now;
+        this.debugStats_.underflowDelta = now >= prev ? (now - prev) : 0;
+      } catch (err) {
+        // ignore
+      }
+    }, this.debugUnderflowSampleIntervalMs_);
+  }
+
+  private stopUnderflowSampling_(): void {
+    if (this.debugUnderflowTimerId_ !== -1) {
+      clearInterval(this.debugUnderflowTimerId_);
+      this.debugUnderflowTimerId_ = -1;
+    }
+  }
+
+  private ensureAudioJankWatcherInstalled_(): void {
+    if (this.debugAudioJankWatcherInstalled_) return;
+    this.debugAudioJankWatcherInstalled_ = true;
+    try {
+      hiAppEvent.addWatcher({
+        name: 'free_pcm_audio_jank_watcher',
+        appEventFilters: [
+          {
+            domain: hiAppEvent.domain.OS,
+            names: [hiAppEvent.event.AUDIO_JANK_FRAME]
+          }
+        ],
+        onReceive: (domain: string, appEventGroups: Array<hiAppEvent.AppEventGroup>) => {
+          if (!this.debugEnabled_) return;
+          if (domain !== hiAppEvent.domain.OS) return;
+          this.debugStats_.audioJankEvents++;
+          try {
+            this.debugStats_.lastAudioJankEventJson = JSON.stringify(appEventGroups);
+          } catch (e) {
+            // ignore
+          }
+          hilog.info(0x3200, 'AudioRendererPlayer', 'AUDIO_JANK_FRAME received');
+        }
+      });
+    } catch (err) {
+      // ignore
+    }
+  }
 
   /**
    * 设置 AudioRenderer 创建回调
@@ -223,12 +349,39 @@ export class AudioRendererPlayer {
           return audio.AudioDataCallbackResult.INVALID;
         }
 
+        if (this.debugEnabled_) {
+          this.debugStats_.writeDataCalls++;
+        }
+
+        let costStartMs: number = 0;
+        if (this.debugEnabled_ && this.debugMeasureWriteDataCost_) {
+          costStartMs = Date.now();
+        }
+
         // Preferred on API 12+: only consume ring when we can fully fill.
         if (d.fillForWriteData) {
           const n = d.fillForWriteData(buffer);
+
+          if (this.debugEnabled_) {
+            this.debugStats_.writeDataLastBytes = n;
+          }
+          if (this.debugEnabled_ && this.debugMeasureWriteDataCost_) {
+            const cost = Date.now() - costStartMs;
+            if (cost > this.debugStats_.writeDataMaxCostMs) {
+              this.debugStats_.writeDataMaxCostMs = cost;
+            }
+          }
+
           if (n > 0) {
             this.emitPcmTap(buffer, n);
+            if (this.debugEnabled_) {
+              this.debugStats_.writeDataValid++;
+            }
             return audio.AudioDataCallbackResult.VALID;
+          }
+
+          if (this.debugEnabled_) {
+            this.debugStats_.writeDataInvalid++;
           }
           return audio.AudioDataCallbackResult.INVALID;
         }
@@ -236,11 +389,26 @@ export class AudioRendererPlayer {
         // Fallback (legacy): consumes and pads with zeros, always treated as valid.
         d.fill(buffer);
         this.emitPcmTap(buffer, buffer.byteLength);
+
+        if (this.debugEnabled_) {
+          this.debugStats_.writeDataLastBytes = buffer.byteLength;
+          this.debugStats_.writeDataValid++;
+          if (this.debugMeasureWriteDataCost_) {
+            const cost = Date.now() - costStartMs;
+            if (cost > this.debugStats_.writeDataMaxCostMs) {
+              this.debugStats_.writeDataMaxCostMs = cost;
+            }
+          }
+        }
         return audio.AudioDataCallbackResult.VALID;
       });
       await this.renderer.start();
       this.isPlaying_ = true;
       this.startTimeUpdate();
+
+      if (this.debugEnabled_) {
+        this.startUnderflowSampling_();
+      }
     } catch (err) {
       const e = err as BusinessError;
       throw new Error(`AudioRenderer start failed: ${e.message}`);
@@ -657,6 +825,7 @@ export class AudioRendererPlayer {
   public async stop(): Promise<void> {
     // 停止时间更新定时器
     this.stopTimeUpdate();
+    this.stopUnderflowSampling_();
     this.isPlaying_ = false;
 
     try {
@@ -671,6 +840,11 @@ export class AudioRendererPlayer {
 
     try {
       if (this.renderer) {
+        try {
+          await this.renderer.flush();
+        } catch (e) {
+          // ignore
+        }
         await this.renderer.stop();
         await this.renderer.release();
       }

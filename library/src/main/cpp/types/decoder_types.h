@@ -121,6 +121,8 @@ struct PcmStreamDecoderContext {
     int32_t bitrate;
     int32_t sampleFormat;
 
+    int32_t qosLevel;
+
     std::atomic<bool> cancel;
     bool success;
     bool readySettled;
@@ -132,6 +134,15 @@ struct PcmStreamDecoderContext {
     // Decoder alive status: set to true when decode thread starts, false when it exits.
     // Used to detect if decoder has failed during long pause.
     std::atomic<bool> decoderAlive;
+
+    std::atomic<bool> debugEnabled;
+    std::atomic<uint64_t> dbgWriteCalls;
+    std::atomic<uint64_t> dbgWriteZero;
+    std::atomic<size_t> dbgAvailLast;
+    std::atomic<uint64_t> dbgWriteMaxUs;
+
+    std::atomic<uint64_t> dbgDspLastUs;
+    std::atomic<uint64_t> dbgDspMaxUs;
 
     // 用于拒绝 done promise
     std::string lastErrStage;

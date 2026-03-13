@@ -122,13 +122,24 @@ void TruePeakLimiter::ProcessFloat(float* samples, size_t frameCount)
 
     const size_t totalFrames = histFrames + frameCount;
     const size_t totalSamples = totalFrames * ch;
-    std::vector<float> buf(totalSamples);
-    std::copy(history_.begin(), history_.end(), buf.begin());
-    std::copy(samples, samples + frameCount * ch, buf.begin() + history_.size());
+    if (workBuf_.size() < totalSamples) {
+        workBuf_.resize(totalSamples);
+    }
+    float* buf = workBuf_.data();
+    std::copy(history_.begin(), history_.end(), buf);
+    std::copy(samples, samples + frameCount * ch, buf + history_.size());
 
     const size_t gainCount = totalFrames;
-    std::vector<float> gReq(gainCount, 1.0f);
-    std::vector<float> gTgt(gainCount, 1.0f);
+    if (workGReq_.size() < gainCount) {
+        workGReq_.resize(gainCount);
+    }
+    if (workGTgt_.size() < gainCount) {
+        workGTgt_.resize(gainCount);
+    }
+    float* gReq = workGReq_.data();
+    float* gTgt = workGTgt_.data();
+    std::fill(gReq, gReq + gainCount, 1.0f);
+    std::fill(gTgt, gTgt + gainCount, 1.0f);
 
     for (size_t i = 0; i + 1 < totalFrames; i++) {
         const size_t i0 = (i == 0) ? 0 : (i - 1);
@@ -182,7 +193,7 @@ void TruePeakLimiter::ProcessFloat(float* samples, size_t frameCount)
     currentGain_ = gain;
 
     const size_t histStart = frameCount * ch;
-    std::copy(buf.begin() + histStart, buf.begin() + histStart + history_.size(), history_.begin());
+    std::copy(buf + histStart, buf + histStart + history_.size(), history_.begin());
 
     lastGainDb_ = LinToDb(lastApplied);
     const float gr = -lastGainDb_;

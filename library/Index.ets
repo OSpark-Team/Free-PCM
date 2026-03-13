@@ -25,6 +25,7 @@
 // 导出工具类
 export { AudioDecoderManager } from './src/main/ets/utils/AudioDecoderManager';
 export { AudioRendererPlayer } from './src/main/ets/utils/AudioRendererPlayer';
+export type { AudioRendererPlayerDebugOptions, AudioRendererPlayerDebugStats } from './src/main/ets/utils/AudioRendererPlayer';
 export { PcmDecoderTool } from './src/main/ets/utils/PcmDecoderTool';
 
 // 导出均衡器相关

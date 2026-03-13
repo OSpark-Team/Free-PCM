@@ -1,6 +1,8 @@
 #include "napi_stream_decoder.h"
 #include <thread>
 
+extern "C" int OH_QoS_SetThreadQoS(int level);
+
 #undef LOG_TAG
 #define LOG_TAG "NapiStreamDecoder"
 
@@ -403,12 +405,31 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
         return zero;
     }
 
+    const bool dbg = ctx->debugEnabled.load();
+    uint64_t dbgStartUs = 0;
+    if (dbg) {
+        ctx->dbgWriteCalls.fetch_add(1);
+        const auto t0 = std::chrono::steady_clock::now().time_since_epoch();
+        dbgStartUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t0).count());
+    }
+
     // Fast path: data already available
     const size_t avail = ctx->ring->Available();
+    if (dbg) {
+        ctx->dbgAvailLast.store(avail);
+    }
     if (avail >= len) {
         (void)ctx->ring->Read(reinterpret_cast<uint8_t *>(buf), len);
         napi_value out;
         napi_create_int32(env, static_cast<int32_t>(len), &out);
+        if (dbg) {
+            const auto t1 = std::chrono::steady_clock::now().time_since_epoch();
+            const uint64_t endUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1).count());
+            const uint64_t durUs = (endUs >= dbgStartUs) ? (endUs - dbgStartUs) : 0;
+            uint64_t prev = ctx->dbgWriteMaxUs.load();
+            while (durUs > prev && !ctx->dbgWriteMaxUs.compare_exchange_weak(prev, durUs)) {
+            }
+        }
         return out;
     }
 
@@ -421,51 +442,35 @@ napi_value PcmDecoderFillForWriteData(napi_env env, napi_callback_info info) {
             }
             napi_value out;
             napi_create_int32(env, static_cast<int32_t>(len), &out);
+            if (dbg) {
+                const auto t1 = std::chrono::steady_clock::now().time_since_epoch();
+                const uint64_t endUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1).count());
+                const uint64_t durUs = (endUs >= dbgStartUs) ? (endUs - dbgStartUs) : 0;
+                uint64_t prev = ctx->dbgWriteMaxUs.load();
+                while (durUs > prev && !ctx->dbgWriteMaxUs.compare_exchange_weak(prev, durUs)) {
+                }
+            }
             return out;
         }
         napi_value zero;
         napi_create_int32(env, 0, &zero);
+        if (dbg) {
+            ctx->dbgWriteZero.fetch_add(1);
+        }
         return zero;
     }
 
-    // Adaptive wait strategy based on data availability
-    // Rationale: if we have significant data already, wait longer for the rest
-    //            if we have very little data, wait shorter to allow system retry
-    int waitTimeoutMs;
-    if (avail == 0) {
-        // No data at all - short wait, let system retry quickly
-        // This avoids blocking too long when decoder is slow
-        waitTimeoutMs = 10;
-    } else {
-        // Calculate how much of the requested data we have
-        const double fillRatio = static_cast<double>(avail) / static_cast<double>(len);
-        
-        if (fillRatio >= 0.75) {
-            // Almost there - wait longer to complete
-            waitTimeoutMs = 50;
-        } else if (fillRatio >= 0.5) {
-            // Halfway - moderate wait
-            waitTimeoutMs = 30;
-        } else if (fillRatio >= 0.25) {
-            // Some data - short wait
-            waitTimeoutMs = 20;
-        } else {
-            // Very little - shortest wait
-            waitTimeoutMs = 10;
-        }
-    }
-
-    const size_t n = ctx->ring->ReadBlocking(reinterpret_cast<uint8_t *>(buf), len, waitTimeoutMs);
-    
-    if (n >= len) {
-        napi_value out;
-        napi_create_int32(env, static_cast<int32_t>(len), &out);
-        return out;
-    }
-    
-    // Timeout or partial read - return 0 to signal INVALID
     napi_value zero;
     napi_create_int32(env, 0, &zero);
+    if (dbg) {
+        ctx->dbgWriteZero.fetch_add(1);
+        const auto t1 = std::chrono::steady_clock::now().time_since_epoch();
+        const uint64_t endUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1).count());
+        const uint64_t durUs = (endUs >= dbgStartUs) ? (endUs - dbgStartUs) : 0;
+        uint64_t prev = ctx->dbgWriteMaxUs.load();
+        while (durUs > prev && !ctx->dbgWriteMaxUs.compare_exchange_weak(prev, durUs)) {
+        }
+    }
     return zero;
 }
 
@@ -943,6 +948,70 @@ napi_value PcmDecoderGetPosition(napi_env env, napi_callback_info info) {
     return result;
 }
 
+napi_value PcmDecoderSetDebugEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    void *data = nullptr;
+    napi_get_cb_info(env, info, &argc, args, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx || argc < 1) {
+        napi_throw_error(env, nullptr, "setDebugEnabled(enabled) requires 1 argument");
+        return nullptr;
+    }
+
+    bool enabled = false;
+    napi_get_value_bool(env, args[0], &enabled);
+    ctx->debugEnabled.store(enabled);
+
+    if (!enabled) {
+        ctx->dbgWriteCalls.store(0);
+        ctx->dbgWriteZero.store(0);
+        ctx->dbgAvailLast.store(0);
+        ctx->dbgWriteMaxUs.store(0);
+        ctx->dbgDspLastUs.store(0);
+        ctx->dbgDspMaxUs.store(0);
+    }
+
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+napi_value PcmDecoderGetDebugStats(napi_env env, napi_callback_info info) {
+    void *data = nullptr;
+    napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+    auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
+    if (!ctx) {
+        napi_throw_error(env, nullptr, "Failed to get decoder context");
+        return nullptr;
+    }
+
+    napi_value out;
+    napi_create_object(env, &out);
+
+    napi_value v;
+
+    napi_create_int64(env, static_cast<int64_t>(ctx->dbgWriteCalls.load()), &v);
+    napi_set_named_property(env, out, "writeCalls", v);
+
+    napi_create_int64(env, static_cast<int64_t>(ctx->dbgWriteZero.load()), &v);
+    napi_set_named_property(env, out, "writeZero", v);
+
+    napi_create_int64(env, static_cast<int64_t>(ctx->dbgAvailLast.load()), &v);
+    napi_set_named_property(env, out, "availLast", v);
+
+    napi_create_int64(env, static_cast<int64_t>(ctx->dbgWriteMaxUs.load()), &v);
+    napi_set_named_property(env, out, "writeMaxUs", v);
+
+    napi_create_int64(env, static_cast<int64_t>(ctx->dbgDspLastUs.load()), &v);
+    napi_set_named_property(env, out, "dspLastUs", v);
+
+    napi_create_int64(env, static_cast<int64_t>(ctx->dbgDspMaxUs.load()), &v);
+    napi_set_named_property(env, out, "dspMaxUs", v);
+
+    return out;
+}
+
 // ============================================================================
 // 流式解码器异步工作
 // ============================================================================
@@ -951,6 +1020,15 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
     auto *ctx = static_cast<PcmStreamDecoderContext *>(data);
     if (!ctx) {
         return;
+    }
+
+    const int32_t q = ctx->qosLevel;
+    if (q != -2) {
+        if (q >= 0 && q <= 5) {
+            (void)OH_QoS_SetThreadQoS(static_cast<int>(q));
+        } else {
+            (void)OH_QoS_SetThreadQoS(3);
+        }
     }
 
     ctx->success = false;
@@ -1050,6 +1128,20 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
     };
 
     AudioDecoder::PcmDataCallback pcmCb = [ctx](const uint8_t *pcm, size_t size, int64_t /*ptsMs*/) {
+        const bool dbg = ctx->debugEnabled.load();
+        const auto dspT0 = dbg ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+        auto finishDsp = [&](bool ok) -> bool {
+            if (dbg) {
+                const auto dspT1 = std::chrono::steady_clock::now();
+                const uint64_t us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(dspT1 - dspT0).count());
+                ctx->dbgDspLastUs.store(us);
+                uint64_t prev = ctx->dbgDspMaxUs.load();
+                while (us > prev && !ctx->dbgDspMaxUs.compare_exchange_weak(prev, us)) {
+                }
+            }
+            return ok;
+        };
         // Check for pause state: wait until resumed instead of blocking on network.
         // This prevents network timeout during long pauses.
         // IMPORTANT: Also break out of pause if there's a pending seek request,
@@ -1128,7 +1220,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
         const int32_t sf = ctx->actualSampleFormat;
         const int32_t bytesPerSample = (sf == 4) ? 4 : ((sf == 3) ? 4 : 2);  // F32LE=4, S32LE=4, S16LE=2
         if (bytesPerSample != 2 && bytesPerSample != 4) {
-            return ctx->ring->Push(pcm, size, &ctx->cancel);
+            return finishDsp(ctx->ring->Push(pcm, size, &ctx->cancel));
         }
 
         const bool chanVolSupported = (ch == 1 || ch == 2);
@@ -1136,14 +1228,14 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
                                  ((ch == 1 && volL1000 != 1000) || (ch == 2 && (volL1000 != 1000 || volR1000 != 1000)));
 
         if (!needEq && !needChanVol && !needDrc) {
-            return ctx->ring->Push(pcm, size, &ctx->cancel);
+            return finishDsp(ctx->ring->Push(pcm, size, &ctx->cancel));
         }
 
         const size_t sampleCount = size / static_cast<size_t>(bytesPerSample);
         const size_t frameCount = sampleCount / static_cast<size_t>(ch);
         const size_t bytesToProcess = frameCount * static_cast<size_t>(ch) * static_cast<size_t>(bytesPerSample);
         if (bytesToProcess == 0) {
-            return ctx->ring->Push(pcm, size, &ctx->cancel);
+            return finishDsp(ctx->ring->Push(pcm, size, &ctx->cancel));
         }
 
         if (needEq) {
@@ -1297,12 +1389,12 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
                 if (v < -32768.0f) v = -32768.0f;
                 ctx->eqScratch16[i] = static_cast<int16_t>(std::lround(v));
             }
-            return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch16.data()), size, &ctx->cancel);
+            return finishDsp(ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch16.data()), size, &ctx->cancel));
         }
 
         if (sf == 4) {
             // F32LE output: directly use the float scratch buffer
-            return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->dspScratchF.data()), size, &ctx->cancel);
+            return finishDsp(ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->dspScratchF.data()), size, &ctx->cancel));
         }
 
         // S32LE output
@@ -1313,7 +1405,7 @@ void ExecutePcmStreamDecode(napi_env /*env*/, void *data) {
             if (v < -2147483648.0) v = -2147483648.0;
             ctx->eqScratch32[i] = static_cast<int32_t>(std::llround(v));
         }
-        return ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch32.data()), size, &ctx->cancel);
+        return finishDsp(ctx->ring->Push(reinterpret_cast<const uint8_t *>(ctx->eqScratch32.data()), size, &ctx->cancel));
     };
 
     AudioDecoder::ErrorCallback errorCb = [ctx](const std::string &stage, int32_t code, const std::string &message) {
@@ -1493,6 +1585,7 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     int32_t channelCount = 0;
     int32_t bitrate = 0;
     int32_t sampleFormat = 0; // 0=auto (default), 1=S16LE, 3=S32LE
+    int32_t qosLevel = -1;
     // ringBytes:
     // - 0 means auto (adaptive by audio format + duration + source type)
     // - otherwise fixed ring buffer size
@@ -1524,6 +1617,19 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
                         sampleFormat = sf;
                     } else {
                         sampleFormat = 0;
+                    }
+                }
+            }
+
+            if (napi_get_named_property(env, args[1], "qosLevel", &v) == napi_ok) {
+                int32_t q = -1;
+                if (napi_get_value_int32(env, v, &q) == napi_ok) {
+                    if (q == -2) {
+                        qosLevel = -2;
+                    } else if (q >= 0 && q <= 5) {
+                        qosLevel = q;
+                    } else {
+                        qosLevel = -1;
                     }
                 }
             }
@@ -1603,7 +1709,15 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     ctx->channelCount = channelCount;
     ctx->bitrate = bitrate;
     ctx->sampleFormat = sampleFormat;
+    ctx->qosLevel = qosLevel;
     ctx->cancel.store(false);
+    ctx->debugEnabled.store(false);
+    ctx->dbgWriteCalls.store(0);
+    ctx->dbgWriteZero.store(0);
+    ctx->dbgAvailLast.store(0);
+    ctx->dbgWriteMaxUs.store(0);
+    ctx->dbgDspLastUs.store(0);
+    ctx->dbgDspMaxUs.store(0);
     ctx->success = false;
     ctx->readySettled = false;
     ctx->lastErrStage = "";
@@ -1730,6 +1844,14 @@ napi_value CreatePcmStreamDecoder(napi_env env, napi_callback_info info) {
     napi_value closeFn;
     napi_create_function(env, "close", NAPI_AUTO_LENGTH, PcmDecoderClose, ctx, &closeFn);
     napi_set_named_property(env, decoderObj, "close", closeFn);
+
+    napi_value setDebugEnabledFn;
+    napi_create_function(env, "setDebugEnabled", NAPI_AUTO_LENGTH, PcmDecoderSetDebugEnabled, ctx, &setDebugEnabledFn);
+    napi_set_named_property(env, decoderObj, "setDebugEnabled", setDebugEnabledFn);
+
+    napi_value getDebugStatsFn;
+    napi_create_function(env, "getDebugStats", NAPI_AUTO_LENGTH, PcmDecoderGetDebugStats, ctx, &getDebugStatsFn);
+    napi_set_named_property(env, decoderObj, "getDebugStats", getDebugStatsFn);
 
     napi_value setEqEnabledFn;
     napi_create_function(env, "setEqEnabled", NAPI_AUTO_LENGTH, PcmDecoderSetEqEnabled, ctx, &setEqEnabledFn);

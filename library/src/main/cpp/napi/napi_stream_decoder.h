@@ -131,6 +131,9 @@ napi_value PcmDecoderSeekToAsync(napi_env env, napi_callback_info info);
  */
 napi_value PcmDecoderGetPosition(napi_env env, napi_callback_info info);
 
+napi_value PcmDecoderSetDebugEnabled(napi_env env, napi_callback_info info);
+napi_value PcmDecoderGetDebugStats(napi_env env, napi_callback_info info);
+
 // ============================================================================
 // 流式解码器异步工作
 // ============================================================================

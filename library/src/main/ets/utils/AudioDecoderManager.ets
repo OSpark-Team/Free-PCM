@@ -64,6 +64,14 @@ export interface PcmStreamDecoderOptions {
   eqEnabled?: boolean;
   /** 均衡器 10 段增益配置 (dB) */
   eqGainsDb?: number[];
+
+  /**
+   * 解码/处理线程 QoS 等级（可选）。
+   * - 0~5 对应 Native QoS_Level 枚举值（QOS_BACKGROUND..QOS_USER_INTERACTIVE）
+   * - -1 表示使用库默认值
+   * - -2 表示不设置 QoS（完全交给系统）
+   */
+  qosLevel?: number;
 }
 
 /** DRC 仪表数据 */
@@ -112,6 +120,16 @@ export interface PcmStreamDecoder {
    * - 数据充足或 EOS 尾帧时返回 buffer.byteLength（不足部分会自动补 0）
    */
   fillForWriteData?: (buffer: ArrayBuffer) => number;
+
+  setDebugEnabled?: (enabled: boolean) => void;
+  getDebugStats?: () => {
+    writeCalls: number;
+    writeZero: number;
+    availLast: number;
+    writeMaxUs: number;
+    dspLastUs: number;
+    dspMaxUs: number;
+  };
   /** 关闭解码器并释放资源 */
   close: () => void;
   /** 设置均衡器开关状态 */

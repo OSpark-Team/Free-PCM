@@ -46,6 +46,10 @@ private:
 
     size_t lookaheadFrames_;
     std::vector<float> history_;   // interleaved, size = lookaheadFrames_ * ch
+
+    std::vector<float> workBuf_;
+    std::vector<float> workGReq_;
+    std::vector<float> workGTgt_;
     float lastGainDb_;
     float lastGrDb_;
 };

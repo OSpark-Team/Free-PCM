@@ -108,6 +108,8 @@ export type PcmStreamDecoderOptions = {
    * eqGainsDb: [5, 4, 3, 1, 0, -1, 1, 3, 4, 5] // V型响应
    */
   eqGainsDb?: number[];
+
+  qosLevel?: number;
 };
 
 /**
@@ -230,6 +232,16 @@ export type PcmStreamDecoder = {
    */
   fillForWriteData?: (buffer: ArrayBuffer) => number;
 
+  setDebugEnabled?: (enabled: boolean) => void;
+  getDebugStats?: () => {
+    writeCalls: number;
+    writeZero: number;
+    availLast: number;
+    writeMaxUs: number;
+    dspLastUs: number;
+    dspMaxUs: number;
+  };
+
   /**
    * 请求停止解码
    *
@@ -323,6 +335,24 @@ export type PcmStreamDecoder = {
    * 获取当前播放位置（毫秒）
    */
   getPosition: () => number;
+};
+
+export type AudioRendererPlayerDebugOptions = {
+  measureWriteDataCost?: boolean;
+  underflowSampleIntervalMs?: number;
+  enableAudioJankWatcher?: boolean;
+};
+
+export type AudioRendererPlayerDebugStats = {
+  writeDataCalls: number;
+  writeDataValid: number;
+  writeDataInvalid: number;
+  writeDataLastBytes: number;
+  writeDataMaxCostMs: number;
+  underflowCount: number;
+  underflowDelta: number;
+  audioJankEvents: number;
+  lastAudioJankEventJson: string;
 };
 
 /**
