@@ -1,0 +1,64 @@
+name: HarmonyOS App Build
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # 缓存 Command Line Tools
+      - name: Cache Command Line Tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: ./command-line-tools
+          key: ${{ runner.os }}-harmony-tools-6.1.0.816
+
+      # 缓存未命中时下载 Command Line Tools
+      - name: Download Command Line Tools
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -L -o tools.zip https://github.com/Okysu/harmony-auto-build/releases/download/commandline-tools-linux-x64-6.1.0.816/commandline-tools-linux-x64-6.1.0.816.zip
+          unzip tools.zip
+          rm tools.zip
+
+      # 配置 SDK 路径、环境变量及可执行权限
+      - name: Setup Environment
+        run: |
+          TOOLS_DIR=$(pwd)/command-line-tools
+          echo "hwsdk.dir=$TOOLS_DIR/sdk" > local.properties
+          echo "$TOOLS_DIR/bin" >> $GITHUB_PATH
+          echo "OHPM_HOME=$TOOLS_DIR/ohpm" >> $GITHUB_ENV
+          echo "HOS_SDK_HOME=$TOOLS_DIR/sdk" >> $GITHUB_ENV
+          chmod -R +x $TOOLS_DIR/bin
+
+      - name: Install Dependencies
+        run: ohpm install
+
+      # 执行 Debug 无签名构建
+      - name: Build HAP (Debug)
+        run: hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: harmony-app-debug
+          path: |
+            **/build/**/outputs/**/*.hap
+            **/build/**/outputs/**/*.app
+            **/build/**/outputs/**/*.hsp
+            **/build/**/outputs/**/*.har
